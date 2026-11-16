@@ -1,0 +1,12 @@
+# Extras on top of AvatarForcing's requirements.txt
+aiortc
+aiohttp
+av
+scipy
+faster-whisper
+ptts
+onnxruntime
+# VAD / turn detection
+silero-vad
+# LLM client
+openai

@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AvatarForcing voice chat (demo)</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 2rem; background: #111; color: #eee; }
+  h1 { font-weight: 300; }
+  .row { display: flex; gap: 2rem; align-items: flex-start; flex-wrap: wrap; }
+  button { padding: .5rem 1rem; font-size: 1rem; cursor: pointer; border: 1px solid #444; background: #222; color: #eee; border-radius: 4px; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  video { width: 384px; height: 384px; background: #d0d0d2; border-radius: 20px; }
+  #local { object-fit: cover; }   /* fill the frame — crop instead of letterbox */
+  .label { font-size: .85rem; color: #9cf; margin-bottom: 0.3rem; }
+  #log { margin-top: 1rem; font-family: ui-monospace, monospace; font-size: .85rem;
+         white-space: pre-wrap; color: #9cf; max-height: 240px; overflow-y: auto;
+         background: #000; padding: 8px; border-radius: 4px; width: 820px; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 10px;
+          background: #233; color: #9cf; font-size: .8rem; margin-left: 8px; }
+  .big-stats { display: flex; flex-direction: column; gap: 10px;
+               margin-top: calc(.85rem + .3rem + 2px); /* align with top of video, past the label */
+               font-family: ui-monospace, monospace; }
+  .stat { background: #1a1a1a; border: 1px solid #333; border-radius: 6px;
+          padding: 10px 16px; min-width: 120px; }
+  .stat .num { font-size: 1.8rem; color: #8fe; font-weight: 600; }
+  .stat .label2 { font-size: .75rem; color: #99a; text-transform: uppercase; letter-spacing: 0.1em; }
+  .vwrap { position: relative; width: 384px; height: 384px; }
+  .overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 10px;
+    color: #8fe; border-radius: 20px;
+    background: #000 center/cover no-repeat;
+    font-family: ui-monospace, monospace; font-size: .9rem;
+  }
+  .overlay::before {
+    /* Scrim over the ref image so the spinner/text are readable */
+    content: ""; position: absolute; inset: 0; background: rgba(0,0,0,0.45);
+    border-radius: 20px;
+  }
+  .overlay .spinner, .overlay > div:not(.spinner) { position: relative; z-index: 1; }
+  .spinner {
+    width: 44px; height: 44px; border: 4px solid #223; border-top-color: #8fe;
+    border-radius: 50%; animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .overlay.hidden { display: none; }
+  #chat { width: 820px; margin-top: 1rem; max-height: 340px; overflow-y: auto;
+          background: #0b0b10; border: 1px solid #222; border-radius: 6px;
+          padding: 10px 14px; font-size: .95rem; line-height: 1.45;
+          font-family: -apple-system, system-ui, sans-serif; }
+  .msg { margin: 4px 0; padding: 4px 0; }
+  .msg .who { display: inline-block; min-width: 68px; font-weight: 600; margin-right: 6px; }
+  .msg.you .who { color: #cff; }
+  .msg.avatar .who { color: #fc9; }
+  #picker { display: flex; gap: 12px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
+  .thumb { width: 80px; height: 80px; border: 2px solid #333; border-radius: 6px;
+           cursor: pointer; object-fit: cover; }
+  .thumb.selected { border-color: #8fe; }
+  #avatar-name { background: #1a1a1a; color: #eee; border: 1px solid #333;
+                 border-radius: 4px; padding: 6px 10px; font-size: .95rem;
+                 font-family: -apple-system, system-ui, sans-serif; width: 180px; }
+  #gear { background: #1a1a1a; border: 1px solid #333; color: #eee;
+          border-radius: 6px; padding: 2px 8px; font-size: 1rem;
+          line-height: 1.2; cursor: pointer; }
+  #panel { position: fixed; top: 56px; right: 16px; width: 320px;
+           background: #111; border: 1px solid #333; border-radius: 10px;
+           padding: 14px 18px; z-index: 10; display: none; }
+  #panel.open { display: block; }
+  #panel h3 { margin: 0 0 10px 0; font-weight: 400; font-size: 1rem; color: #9cf; }
+  #panel .knob { margin-bottom: 10px; display: flex; align-items: center;
+                 justify-content: space-between; gap: 8px; }
+  #panel .knob label { font-size: .85rem; color: #ccc; flex: 1; }
+  #panel .knob input[type=range] { flex: 1; }
+  #panel .knob input[type=number] { width: 70px; background: #0b0b10;
+          border: 1px solid #333; color: #eee; border-radius: 4px;
+          padding: 3px 6px; font-size: .85rem; }
+  #panel .row-btn { display: flex; gap: 8px; margin-top: 12px; }
+  #panel button { flex: 1; }
+  .section { margin-top: 1rem; }
+  .twisty { cursor: pointer; user-select: none; color: #9cf;
+            font-family: ui-monospace, monospace; font-size: .9rem;
+            margin-bottom: 6px; display: flex; align-items: baseline; gap: .5em;
+            max-width: 820px; }
+  .twisty .tri { display: inline-block; width: 1em; flex: 0 0 auto; }
+  .twisty .label-txt { flex: 0 0 auto; }
+  .twisty .preview { flex: 1 1 auto; color: #777; font-style: italic;
+                     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                     min-width: 0; }
+  .section:not(.collapsed) .twisty .preview { display: none; }
+  .section.collapsed #chat, .section.collapsed #log { display: none; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <h3>Audio / VAD tuning</h3>
+  <div class="knob">
+    <label title="Microphone energy floor. Chunks below this are treated as silence and never shown to Silero. Raise if avatar audio bleeds into mic.">rms gate</label>
+    <input type="number" id="k-rms" step="0.001" min="0" max="0.2" value="0.015">
+  </div>
+  <div class="knob">
+    <label title="Silero speech-probability threshold. Higher = stricter.">speech threshold</label>
+    <input type="number" id="k-prob" step="0.05" min="0" max="1" value="0.70">
+  </div>
+  <div class="knob">
+    <label title="Sustained speech required before start-of-speech fires (seconds).">enter time (s)</label>
+    <input type="number" id="k-enter" step="0.05" min="0" max="2" value="0.48">
+  </div>
+  <div class="knob">
+    <label title="Positive = delay audio (mouth leads sound). Negative = inverse. Tune by ear.">lipsync offset (ms)</label>
+    <input type="number" id="k-lipsync" step="10" min="-300" max="300" value="0">
+  </div>
+  <div class="row-btn">
+    <button id="k-save">Save</button>
+    <button id="k-reset">Reset defaults</button>
+  </div>
+</div>
+<h1>AvatarForcing — voice chat <span id="state" class="pill">disconnected</span></h1>
+<div id="picker">
+  <span class="label">avatar:</span>
+  <span id="thumbs"></span>
+  <span class="label">name:</span>
+  <input id="avatar-name" placeholder="name">
+</div>
+<div>
+  <button id="start">Start session</button>
+  <button id="stop" disabled>Stop</button>
+</div>
+<div style="height: 1rem;"></div>
+<div class="row">
+  <div>
+    <div class="label">you (local webcam preview)</div>
+    <video id="local" autoplay playsinline muted></video>
+  </div>
+  <div>
+    <div class="label">avatar (remote)</div>
+    <div class="vwrap">
+      <video id="remote" autoplay playsinline style="width:100%;height:100%"></video>
+      <div class="overlay hidden" id="overlay" style="background-image: url('/avatar-ref.jpg');">
+        <div class="spinner"></div>
+        <div>waiting for avatar…</div>
+      </div>
+    </div>
+  </div>
+  <div class="big-stats">
+    <div class="stat"><div class="num" id="vfps">—</div><div class="label2">video fps</div></div>
+    <div class="stat"><div class="num" id="afps">—</div><div class="label2">audio kbps</div></div>
+    <div class="stat"><div class="num" id="drop">0</div><div class="label2">dropped</div></div>
+    <div class="stat"><div class="num" id="lag">—</div><div class="label2">lag (s)</div></div>
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:4px;">
+      <label style="font-size:.85rem; color:#9cf; display:flex; align-items:center; gap:6px;">
+        <input type="checkbox" id="barge-in" checked> barge-in
+      </label>
+      <button id="gear" title="Settings">⚙</button>
+    </div>
+    <div style="display:flex; align-items:center; gap:8px; padding-top:2px;">
+      <label style="font-size:.85rem; color:#9cf; display:flex; align-items:center; gap:6px;">
+        <input type="checkbox" id="mute-mic"> mute mic
+      </label>
+    </div>
+  </div>
+</div>
+<div class="section">
+  <div class="twisty" data-target="chat"><span class="tri">▼</span><span class="label-txt">chat</span><span class="preview"></span></div>
+  <div id="chat"></div>
+</div>
+<div class="section">
+  <div class="twisty" data-target="log"><span class="tri">▼</span><span class="label-txt">log</span><span class="preview"></span></div>
+  <div id="log"></div>
+</div>
+
+<script>
+let pc = null;
+let localStream = null;
+
+const logEl = document.getElementById('log');
+function log(s){
+  const t = new Date().toISOString().substring(11,19);
+  logEl.textContent += `[${t}] ${s}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+  if (typeof refreshTwistyPreview === 'function') refreshTwistyPreview('log');
+}
+function setState(s){ document.getElementById('state').textContent = s; }
+
+// Mute: belt-and-suspenders. Disable the local MediaStreamTrack so the
+// browser sends silence/CN, AND notify the server via the chat data channel
+// so consume_mic writes zeros to the ring. Browser-track behavior on
+// mute+unmute is finicky (some stacks stall RTP delivery), so the server
+// gate is what we actually rely on.
+function applyMuteState(){
+  const muted = document.getElementById('mute-mic').checked;
+  if (localStream) {
+    for (const t of localStream.getAudioTracks()) t.enabled = !muted;
+  }
+  if (window.__chatCh && window.__chatCh.readyState === 'open') {
+    try { window.__chatCh.send(JSON.stringify({type: 'mute-mic', muted})); } catch(e){}
+  }
+  log('mic ' + (muted ? 'muted' : 'unmuted'));
+}
+
+function appendChat(who, text) {
+  const chat = document.getElementById('chat');
+  const div = document.createElement('div');
+  div.className = 'msg ' + who;
+  const w = document.createElement('span'); w.className = 'who'; w.textContent = who + ':';
+  const t = document.createElement('span'); t.textContent = ' ' + text;
+  div.appendChild(w); div.appendChild(t);
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  if (typeof refreshTwistyPreview === 'function') refreshTwistyPreview('chat');
+}
+
+let selectedAvatarId = null;
+
+async function loadAvatars(){
+  const r = await fetch('/avatars');
+  const d = await r.json();
+  selectedAvatarId = d.current;
+  const wrap = document.getElementById('thumbs');
+  wrap.innerHTML = '';
+  for (const a of d.avatars){
+    const img = document.createElement('img');
+    img.src = `/thumb/${a.id}`;
+    img.className = 'thumb' + (a.id === d.current ? ' selected' : '');
+    img.title = a.name;
+    img.onclick = () => {
+      selectedAvatarId = a.id;
+      for (const el of wrap.querySelectorAll('.thumb')) el.classList.remove('selected');
+      img.classList.add('selected');
+      document.getElementById('avatar-name').value = a.name;
+    };
+    wrap.appendChild(img);
+  }
+  // Initialize name field with the current default
+  const cur = d.avatars.find(a => a.id === d.current);
+  if (cur) document.getElementById('avatar-name').value = cur.name;
+}
+loadAvatars();
+
+async function start(){
+  document.getElementById('start').disabled = true;
+  document.getElementById('stop').disabled = false;
+  document.getElementById('picker').style.display = 'none';
+  // Apply avatar selection + name to the server BEFORE opening the session.
+  const name = document.getElementById('avatar-name').value.trim();
+  try {
+    await fetch('/set-avatar', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: selectedAvatarId, name: name}),
+    });
+  } catch(e) { log('set-avatar failed: ' + e.message); }
+  // Force the overlay to refresh with the newly-selected ref image.
+  document.getElementById('overlay').style.backgroundImage =
+    `url('/avatar-ref.jpg?v=${Date.now()}')`;
+  document.getElementById('overlay').classList.remove('hidden');
+  setState('requesting mic+cam');
+  log('getUserMedia...');
+
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 48000 },
+      video: { width: 640, height: 480, frameRate: 25 }
+    });
+  } catch (e) {
+    log('getUserMedia failed: ' + e.message);
+    return;
+  }
+  document.getElementById('local').srcObject = localStream;
+
+  // No STUN for localhost/LAN — Google STUN was adding ~2-3 s to ICE
+  // gathering. Host candidates are enough for same-network delivery.
+  pc = new RTCPeerConnection({ iceServers: [] });
+
+  // Create chat data channel BEFORE adding tracks so the SDP includes it.
+  // Server registers @pc.on("datachannel") and sends {who, text} JSON.
+  const chatCh = pc.createDataChannel('chat', {ordered: true});
+  window.__chatCh = chatCh;    // expose for settings panel knobs
+  chatCh.onopen = () => {
+    log('chat channel open');
+    // Send initial barge-in + all current knob values
+    const enabled = document.getElementById('barge-in').checked;
+    try { chatCh.send(JSON.stringify({type: 'barge-in', enabled})); } catch(e){}
+    for (const [k, id] of Object.entries(KNOB_INPUTS)){
+      const v = parseFloat(document.getElementById(id).value);
+      try { chatCh.send(JSON.stringify({type: 'config', key: k, value: v})); } catch(e){}
+    }
+  };
+  // Live-toggle on checkbox change (takes effect immediately mid-session)
+  document.getElementById('barge-in').onchange = (e) => {
+    const enabled = e.target.checked;
+    try { chatCh.send(JSON.stringify({type: 'barge-in', enabled})); } catch(e){}
+    log('barge-in ' + (enabled ? 'enabled' : 'disabled'));
+  };
+  // Honor whatever mute state is currently in the UI (may have been
+  // toggled before Start), then live-toggle on change.
+  applyMuteState();
+  document.getElementById('mute-mic').onchange = applyMuteState;
+  chatCh.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'lag') {
+        document.getElementById('lag').textContent = msg.value.toFixed(2);
+        return;
+      }
+      appendChat(msg.who || 'avatar', msg.text || '');
+    } catch { appendChat('avatar', ev.data); }
+  };
+
+  // Send mic + webcam up
+  for (const track of localStream.getTracks()) {
+    pc.addTrack(track, localStream);
+    log('added outbound ' + track.kind);
+  }
+
+  // Receive avatar video + audio
+  pc.ontrack = (ev) => {
+    log('got remote ' + ev.track.kind);
+    const el = document.getElementById('remote');
+    if (!el.srcObject) el.srcObject = new MediaStream();
+    el.srcObject.addTrack(ev.track);
+  };
+
+  pc.onconnectionstatechange = () => {
+    setState(pc.connectionState);
+    log('pc: ' + pc.connectionState);
+  };
+  pc.oniceconnectionstatechange = () => log('ice: ' + pc.iceConnectionState);
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  // Wait briefly for ICE gathering
+  await new Promise(resolve => {
+    if (pc.iceGatheringState === 'complete') return resolve();
+    const check = () => {
+      if (pc.iceGatheringState === 'complete') {
+        pc.removeEventListener('icegatheringstatechange', check);
+        resolve();
+      }
+    };
+    pc.addEventListener('icegatheringstatechange', check);
+    setTimeout(resolve, 1500);
+  });
+
+  log('POST /offer');
+  const resp = await fetch('/offer', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({sdp: pc.localDescription.sdp, type: pc.localDescription.type})
+  });
+  const answer = await resp.json();
+  await pc.setRemoteDescription(answer);
+  log('answered');
+
+  // Stats poll
+  let _lastABytes = 0, _lastT = 0;
+  setInterval(async () => {
+    if (!pc) return;
+    const stats = await pc.getStats();
+    const now = performance.now();
+    const dt = _lastT ? (now - _lastT) / 1000 : 1;
+    stats.forEach(r => {
+      if (r.type === 'inbound-rtp' && r.kind === 'video') {
+        const fps = r.framesPerSecond != null ? r.framesPerSecond.toFixed(1) : '0.0';
+        document.getElementById('vfps').textContent = fps;
+        document.getElementById('drop').textContent = (r.framesDropped || 0);
+        // Hide spinner once we're actually getting frames
+        if ((r.framesPerSecond || 0) > 0.5) {
+          document.getElementById('overlay').classList.add('hidden');
+        }
+      }
+      if (r.type === 'inbound-rtp' && r.kind === 'audio') {
+        const dbytes = (r.bytesReceived || 0) - _lastABytes;
+        _lastABytes = r.bytesReceived || 0;
+        const kbps = ((dbytes * 8) / 1024 / dt).toFixed(0);
+        document.getElementById('afps').textContent = kbps;
+      }
+    });
+    _lastT = now;
+  }, 1000);
+}
+
+function stop(){
+  if (pc) { pc.close(); pc = null; }
+  if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+  document.getElementById('local').srcObject = null;
+  document.getElementById('remote').srcObject = null;
+  // Pre-session look: blank off-white video area, no overlay/spinner/placeholder.
+  document.getElementById('overlay').classList.add('hidden');
+  document.getElementById('start').disabled = false;
+  document.getElementById('stop').disabled = true;
+  document.getElementById('picker').style.display = 'flex';
+  setState('stopped');
+}
+
+document.getElementById('start').onclick = start;
+document.getElementById('stop').onclick  = stop;
+
+// ---- Settings gear ----
+const KNOB_DEFAULTS = {rms: 0.015, prob: 0.70, enter: 0.48, lipsync: 0};
+const KNOB_INPUTS = {rms: 'k-rms', prob: 'k-prob', enter: 'k-enter', lipsync: 'k-lipsync'};
+function loadKnobs(){
+  try {
+    const saved = JSON.parse(localStorage.getItem('af_knobs') || '{}');
+    for (const k of Object.keys(KNOB_INPUTS)){
+      if (saved[k] !== undefined)
+        document.getElementById(KNOB_INPUTS[k]).value = saved[k];
+    }
+  } catch(e){}
+}
+loadKnobs();
+function sendKnob(key, value){
+  if (window.__chatCh && window.__chatCh.readyState === 'open'){
+    try { window.__chatCh.send(JSON.stringify({type:'config', key, value})); } catch(e){}
+  }
+}
+document.getElementById('k-save').onclick = () => {
+  const vals = {};
+  for (const [k, id] of Object.entries(KNOB_INPUTS)){
+    vals[k] = parseFloat(document.getElementById(id).value);
+    sendKnob(k, vals[k]);
+  }
+  try { localStorage.setItem('af_knobs', JSON.stringify(vals)); } catch(e){}
+  log('vad settings saved');
+};
+document.getElementById('k-reset').onclick = () => {
+  // Reset inputs to defaults. User can preview (not applied) and click
+  // Save to commit — matches other dialog conventions.
+  for (const [k, id] of Object.entries(KNOB_INPUTS)){
+    document.getElementById(id).value = KNOB_DEFAULTS[k];
+  }
+};
+document.getElementById('gear').onclick = () => {
+  document.getElementById('panel').classList.toggle('open');
+};
+
+// ---- Collapsible sections (chat / log) ----
+function lastLineOfTarget(key){
+  if (key === 'chat'){
+    const last = document.querySelector('#chat .msg:last-child');
+    return last ? last.textContent.trim() : '';
+  }
+  if (key === 'log'){
+    const txt = document.getElementById('log').textContent;
+    const lines = txt.split('\n').map(s => s.trim()).filter(Boolean);
+    return lines.length ? lines[lines.length - 1] : '';
+  }
+  return '';
+}
+function refreshTwistyPreview(key){
+  const el = document.querySelector('.twisty[data-target="' + key + '"]');
+  if (!el) return;
+  const prev = el.querySelector('.preview');
+  if (!prev) return;
+  prev.textContent = lastLineOfTarget(key);
+}
+function applyCollapsed(){
+  const saved = JSON.parse(localStorage.getItem('af_collapsed') || '{}');
+  for (const el of document.querySelectorAll('.twisty')){
+    const key = el.dataset.target;
+    const section = el.parentElement;
+    const tri = el.querySelector('.tri');
+    if (saved[key]){
+      section.classList.add('collapsed');
+      tri.textContent = '▶';
+    } else {
+      section.classList.remove('collapsed');
+      tri.textContent = '▼';
+    }
+    refreshTwistyPreview(key);
+  }
+}
+applyCollapsed();
+for (const el of document.querySelectorAll('.twisty')){
+  el.onclick = () => {
+    const key = el.dataset.target;
+    const saved = JSON.parse(localStorage.getItem('af_collapsed') || '{}');
+    saved[key] = !saved[key];
+    localStorage.setItem('af_collapsed', JSON.stringify(saved));
+    applyCollapsed();
+  };
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AvatarForcing WebRTC demo</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 2rem; background: #111; color: #eee; }
+  h1 { font-weight: 300; }
+  .controls { margin-bottom: 1rem; }
+  button { padding: .5rem 1rem; font-size: 1rem; cursor: pointer; border: 1px solid #444; background: #222; color: #eee; border-radius: 4px; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  video { width: 512px; height: 512px; background: #000; border-radius: 4px; }
+  #log { margin-top: 1rem; font-family: ui-monospace, monospace; font-size: .85rem; white-space: pre-wrap; color: #9cf; max-height: 240px; overflow-y: auto; }
+  .row { display: flex; gap: 2rem; align-items: flex-start; }
+</style>
+</head>
+<body>
+<h1>AvatarForcing — WebRTC stream</h1>
+<div class="controls">
+  <button id="start">Start stream</button>
+  <button id="stop" disabled>Stop</button>
+</div>
+<div class="row">
+  <video id="video" autoplay playsinline muted controls></video>
+  <div>
+    <div>Pre-recorded user side; generated avatar streamed live from this GPU.</div>
+    <div>Click <b>Unmute</b> on the player to hear the avatar audio.</div>
+    <div id="stats"></div>
+    <div id="log"></div>
+  </div>
+</div>
+<script>
+let pc = null;
+const logEl = document.getElementById('log');
+const statsEl = document.getElementById('stats');
+function log(s) {
+  const t = new Date().toISOString().substring(11, 19);
+  logEl.textContent += `[${t}] ${s}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+async function start() {
+  document.getElementById('start').disabled = true;
+  document.getElementById('stop').disabled = false;
+  log('Creating RTCPeerConnection...');
+  pc = new RTCPeerConnection({
+    iceServers: [{urls: 'stun:stun.l.google.com:19302'}]
+  });
+
+  pc.addTransceiver('video', {direction: 'recvonly'});
+  pc.addTransceiver('audio', {direction: 'recvonly'});
+
+  pc.ontrack = (ev) => {
+    log(`Got ${ev.track.kind} track`);
+    const v = document.getElementById('video');
+    v.srcObject = ev.streams[0];
+    v.muted = false;
+  };
+  pc.onconnectionstatechange = () => log(`pc state: ${pc.connectionState}`);
+  pc.oniceconnectionstatechange = () => log(`ice state: ${pc.iceConnectionState}`);
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  // Wait briefly for ICE gathering (trickle-free for simplicity)
+  await new Promise(resolve => {
+    if (pc.iceGatheringState === 'complete') return resolve();
+    const check = () => {
+      if (pc.iceGatheringState === 'complete') {
+        pc.removeEventListener('icegatheringstatechange', check);
+        resolve();
+      }
+    };
+    pc.addEventListener('icegatheringstatechange', check);
+    setTimeout(resolve, 1500);
+  });
+
+  log('Sending offer...');
+  const resp = await fetch('/offer', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sdp: pc.localDescription.sdp, type: pc.localDescription.type})
+  });
+  const answer = await resp.json();
+  await pc.setRemoteDescription(answer);
+  log('Connected.');
+
+  // Simple stats poll
+  setInterval(async () => {
+    if (!pc) return;
+    const stats = await pc.getStats();
+    let fps = '?', bw = '?';
+    stats.forEach(r => {
+      if (r.type === 'inbound-rtp' && r.kind === 'video') {
+        fps = r.framesPerSecond ? r.framesPerSecond.toFixed(1) : '?';
+        bw = r.bytesReceived ? (r.bytesReceived / 1024).toFixed(0) + ' KB' : '?';
+      }
+    });
+    statsEl.textContent = `video fps: ${fps} · bytes: ${bw}`;
+  }, 1000);
+}
+
+function stop() {
+  if (pc) { pc.close(); pc = null; }
+  document.getElementById('start').disabled = false;
+  document.getElementById('stop').disabled = true;
+  log('Stopped.');
+}
+
+document.getElementById('start').onclick = start;
+document.getElementById('stop').onclick = stop;
+</script>
+</body>
+</html>
