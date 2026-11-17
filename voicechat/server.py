@@ -100,6 +100,10 @@ def init_singletons(avatar_ref_path: str = None):
     opt.infer_config = str(AF_ROOT / "configs/inference.yaml")
     opt.mae_ckpt_path = str(AF_ROOT / "pretrained_dir/motion_autoencoder.pth")
     opt.ckpt_path = str(AF_ROOT / "pretrained_dir/flow_transformer.pth")
+    # Config file has these as relative paths assuming CWD == AvatarForcing
+    # repo root; the submodule layout breaks that assumption, so re-root them.
+    opt.wav2vec_model_path = str(AF_ROOT / opt.wav2vec_model_path)
+    opt.pretrained_dir = str(AF_ROOT / opt.pretrained_dir)
     # Multi-GPU split:
     #   - cuda:1 = AvatarForcing (GPU-heavy, isolated for throughput)
     #   - cuda:0 = STT, FaceCropper, vLLM (external process)

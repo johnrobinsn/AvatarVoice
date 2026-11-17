@@ -240,7 +240,9 @@ class AvatarWorker(threading.Thread):
         try:
             from pathlib import Path
             import cv2
-            sample_dir = Path(__file__).resolve().parent.parent / "data/user"
+            # In the AvatarVoice submodule layout the sample user frames live
+            # under the AvatarForcing submodule's data dir.
+            sample_dir = Path(__file__).resolve().parent.parent / "avatarforcing/data/user"
             frames_np = []
             for p in sorted(sample_dir.glob("*.jpg"))[:60]:
                 img = cv2.cvtColor(cv2.imread(str(p)), cv2.COLOR_BGR2RGB)
