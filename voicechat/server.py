@@ -245,6 +245,9 @@ class Session:
         for t in self._tasks:
             try: await t
             except: pass
+        # Drop LLM conversation history so the next session starts fresh.
+        if LLM is not None:
+            LLM.reset()
 
 
 # ---------- Inbound track consumers ----------
@@ -647,6 +650,12 @@ async def set_avatar(request):
 async def offer(request):
     init_singletons()
 
+    # Belt-and-suspenders: also clear LLM history here. If the previous
+    # session didn't close cleanly (crash, abandoned tab, etc.) sess.close()
+    # may not have run; this guarantees fresh conversation per /offer.
+    if LLM is not None:
+        LLM.reset()
+
     params = await request.json()
     offer_desc = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
@@ -718,6 +727,9 @@ async def offer(request):
 
     # Hand this session's rings to the persistent avatar worker
     sess.worker = AVATAR_WORKER   # reference so sess.close() can call end_session()
+    def _on_reanchor():
+        try: sess.chat_ch and sess.chat_ch.send(json.dumps({"type": "log", "text": "reanchor"}))
+        except Exception: pass
     AVATAR_WORKER.start_session(
         uv_ring=sess.user_video_ring,
         af_ring=sess.avatar_audio_feat_ring,
@@ -725,6 +737,7 @@ async def offer(request):
         out_q=sess.out_video_q,
         now_fn=sess.now,
         playhead_fn=lambda: sess.video_playhead,
+        on_reanchor=_on_reanchor,
     )
 
     # Start VAD/turn detect

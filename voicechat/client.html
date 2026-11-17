@@ -9,7 +9,7 @@
   .row { display: flex; gap: 2rem; align-items: flex-start; flex-wrap: wrap; }
   button { padding: .5rem 1rem; font-size: 1rem; cursor: pointer; border: 1px solid #444; background: #222; color: #eee; border-radius: 4px; }
   button:disabled { opacity: .4; cursor: not-allowed; }
-  video { width: 384px; height: 384px; background: #d0d0d2; border-radius: 20px; }
+  video { width: 512px; height: 512px; background: #d0d0d2; border-radius: 20px; }
   #local { object-fit: cover; }   /* fill the frame — crop instead of letterbox */
   .label { font-size: .85rem; color: #9cf; margin-bottom: 0.3rem; }
   #log { margin-top: 1rem; font-family: ui-monospace, monospace; font-size: .85rem;
@@ -24,7 +24,7 @@
           padding: 10px 16px; min-width: 120px; }
   .stat .num { font-size: 1.8rem; color: #8fe; font-weight: 600; }
   .stat .label2 { font-size: .75rem; color: #99a; text-transform: uppercase; letter-spacing: 0.1em; }
-  .vwrap { position: relative; width: 384px; height: 384px; }
+  .vwrap { position: relative; width: 512px; height: 512px; }
   .overlay {
     position: absolute; inset: 0; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 10px;
@@ -48,7 +48,7 @@
           background: #0b0b10; border: 1px solid #222; border-radius: 6px;
           padding: 10px 14px; font-size: .95rem; line-height: 1.45;
           font-family: -apple-system, system-ui, sans-serif; }
-  .msg { margin: 4px 0; padding: 4px 0; }
+  .msg { margin: 0; padding: 1px 0; }
   .msg .who { display: inline-block; min-width: 68px; font-weight: 600; margin-right: 6px; }
   .msg.you .who { color: #cff; }
   .msg.avatar .who { color: #fc9; }
@@ -121,13 +121,16 @@
   <span class="label">name:</span>
   <input id="avatar-name" placeholder="name">
 </div>
-<div>
+<div style="display:flex; align-items:center; gap:12px;">
   <button id="start">Start session</button>
   <button id="stop" disabled>Stop</button>
+  <label style="font-size:.9rem; color:#9cf; display:flex; align-items:center; gap:6px;">
+    <input type="checkbox" id="show-user-video"> Show User Video
+  </label>
 </div>
 <div style="height: 1rem;"></div>
 <div class="row">
-  <div>
+  <div id="user-video-wrap" style="display:none;">
     <div class="label">you (local webcam preview)</div>
     <video id="local" autoplay playsinline muted></video>
   </div>
@@ -180,6 +183,16 @@ function log(s){
   if (typeof refreshTwistyPreview === 'function') refreshTwistyPreview('log');
 }
 function setState(s){ document.getElementById('state').textContent = s; }
+
+// Show/hide the local webcam preview section. Doesn't affect the WebRTC
+// track — we still send the webcam to the server (the model just doesn't
+// use it with u_cfg_scale=0). This only collapses the local UI tile.
+function applyShowUserVideo(){
+  const show = document.getElementById('show-user-video').checked;
+  document.getElementById('user-video-wrap').style.display = show ? '' : 'none';
+}
+applyShowUserVideo();
+document.getElementById('show-user-video').onchange = applyShowUserVideo;
 
 // Mute: belt-and-suspenders. Disable the local MediaStreamTrack so the
 // browser sends silence/CN, AND notify the server via the chat data channel
@@ -300,6 +313,10 @@ async function start(){
       const msg = JSON.parse(ev.data);
       if (msg.type === 'lag') {
         document.getElementById('lag').textContent = msg.value.toFixed(2);
+        return;
+      }
+      if (msg.type === 'log') {
+        log(msg.text || '');
         return;
       }
       appendChat(msg.who || 'avatar', msg.text || '');

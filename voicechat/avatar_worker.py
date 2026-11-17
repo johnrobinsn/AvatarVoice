@@ -100,14 +100,24 @@ class AvatarWorker(threading.Thread):
         # audio), and then alpha-blend it with the next REANCHOR_FADE_FRAMES
         # frames so the reconnect is a smooth 1 s crossfade instead of a cut.
         self._last_emitted_frame: np.ndarray | None = None   # [H,W,3] uint8
+        # Separate anchor: snapshot of the pre-reanchor last frame, held
+        # constant through the whole fade. Without this, each blended frame
+        # feeds back as the next frame's "anchor" and we get recursive
+        # ghosting instead of a clean crossfade.
+        self._fade_anchor: np.ndarray | None = None
         self._reanchor_fade_remaining: int = 0
+        # Dedicated wav2vec thread. Runs on its own CUDA stream so its kernels
+        # can overlap with the main worker's flow-transformer block generation
+        # instead of blocking it (previously a 400 ms wav2vec call between
+        # blocks would starve the video queue by exactly one block).
+        self._wav2vec_thread: threading.Thread | None = None
 
     @property
     def warmup_done(self) -> bool:
         return self._warmup_done.is_set()
 
     def start_session(self, uv_ring, af_ring, pcm_ring, out_q, now_fn,
-                      playhead_fn=None):
+                      playhead_fn=None, on_reanchor=None):
         with self._state_lock:
             self.uv_ring = uv_ring
             self.af_ring = af_ring
@@ -119,6 +129,9 @@ class AvatarWorker(threading.Thread):
             # responses don't drift multi-second behind when generation can't
             # quite hit realtime.
             self.playhead = playhead_fn if playhead_fn is not None else now_fn
+            # Optional: called from this thread each time a reanchor fires,
+            # so the Session can forward a UI log event to the browser.
+            self.on_reanchor = on_reanchor
             # Exponentially-weighted block wall-time. Audio/video tracks read
             # this to compute a self-tuning playback delay: delay ≈ this * 1.2.
             # Fast-rise (~2 blocks) to recover quickly from a spike; slow-decay
@@ -193,6 +206,12 @@ class AvatarWorker(threading.Thread):
         try:
             self._warmup()
             self._warmup_done.set()
+            # Start the dedicated wav2vec thread now that audio_encoder has
+            # been pre-warmed on the main thread. The wav2vec thread will
+            # also pre-warm on its own CUDA context before taking work.
+            self._wav2vec_thread = threading.Thread(
+                target=self._wav2vec_loop, daemon=True, name="af-wav2vec")
+            self._wav2vec_thread.start()
             log.info("avatar worker: idle, waiting for sessions")
             while not self._shutdown.is_set():
                 self._session_ready.wait()
@@ -425,8 +444,74 @@ class AvatarWorker(threading.Thread):
                 self._silence_phase = int((self._silence_phase + n_sil) % L)
         return torch.from_numpy(feats).to(self.device).unsqueeze(0)
 
+    def _wav2vec_loop(self):
+        """Dedicated thread: pulls items from tts_in_q and runs wav2vec on a
+        dedicated CUDA stream so the kernels can overlap with the main worker
+        thread's flow-transformer denoise/decode. Previously wav2vec ran on
+        the main thread between blocks and could block for 300-500 ms, which
+        starved the video queue for exactly that long.
+
+        Side-stream placement lets the GPU scheduler interleave SM allocation
+        between wav2vec and the flow transformer. Net effect: wav2vec is
+        effectively invisible to the per-block wall budget.
+        """
+        try:
+            dev_idx = int(self.device.split(":")[1]) if isinstance(self.device, str) and ":" in self.device else int(self.device)
+            torch.cuda.set_device(dev_idx)
+            stream = torch.cuda.Stream(device=self.device)
+            # Pre-warm audio_encoder on THIS thread + stream so first real
+            # call doesn't race lazy cuDNN/cuBLAS init against the main
+            # worker's running kernels.
+            with torch.cuda.stream(stream), torch.inference_mode(), \
+                 torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                dummy = torch.zeros(1, 16000, dtype=torch.float32, device=self.device)
+                _ = self.af.audio_encoder.inference(dummy, seq_len=25)
+            torch.cuda.synchronize(self.device)
+            log.info("[wav2vec-thread] ready")
+        except Exception:
+            log.exception("[wav2vec-thread] prewarm failed; thread exiting")
+            return
+
+        while not self._shutdown.is_set():
+            try:
+                phrase, pcm_16k = self.tts_in_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                # Round UP to next whole video frame and zero-pad (keeps the
+                # trailing consonant on short phrases).
+                n_frames = max(1, (pcm_16k.size + 639) // 640)
+                n_samples_needed = n_frames * 640
+                if pcm_16k.size < n_samples_needed:
+                    pad = np.zeros(n_samples_needed - pcm_16k.size, dtype=np.float32)
+                    pcm_16k = np.concatenate([pcm_16k, pad])
+                else:
+                    pcm_16k = pcm_16k[:n_samples_needed]
+                tt = time.perf_counter()
+                with torch.cuda.stream(stream), torch.inference_mode(), \
+                     torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    audio_tensor = torch.from_numpy(pcm_16k).unsqueeze(0).to(self.device)
+                    feats = self.af.audio_encoder.inference(audio_tensor, seq_len=n_frames)
+                # .cpu() blocks the wav2vec thread on its own stream — not the
+                # main worker's default stream.
+                feats_np = feats[0].float().cpu().numpy()
+                ms = (time.perf_counter() - tt) * 1000
+                # Schedule at the start of the next block the main worker will
+                # generate — avoids writing features into a block that's
+                # already been drawn without them.
+                horizon = getattr(self, "gen_horizon", self.playhead())
+                target_ts = max(self.af_ring.write_ts, self.pcm_ring.write_ts, horizon)
+                self.af_ring.write(feats_np, start_ts=target_ts)
+                self.pcm_ring.write(pcm_16k, start_ts=target_ts)
+                log.info(f"[wav2vec-thread] phrase={phrase[:40]!r} audio={pcm_16k.size/16000:.2f}s "
+                         f"w2v={ms:.0f}ms scheduled@{target_ts:.2f}")
+            except Exception:
+                log.exception("[wav2vec-thread] phrase processing failed")
+
     def _drain_tts_queue(self):
-        """Run wav2vec on any pending TTS phrases (called between blocks)."""
+        """Legacy in-thread wav2vec drain. No longer called — the dedicated
+        _wav2vec_loop thread owns this work now (overlaps with block gen on a
+        side CUDA stream). Kept temporarily for reference."""
         af = self.af
         while True:
             try:
@@ -489,13 +574,15 @@ class AvatarWorker(threading.Thread):
         dt = 1.0 / 25
         for i, frame in enumerate(vid):
             if (self._reanchor_fade_remaining > 0
-                    and self._last_emitted_frame is not None
-                    and self._last_emitted_frame.shape == frame.shape):
+                    and self._fade_anchor is not None
+                    and self._fade_anchor.shape == frame.shape):
                 alpha = self._reanchor_fade_remaining / self.REANCHOR_FADE_FRAMES
-                frame = (alpha * self._last_emitted_frame.astype(np.float32)
+                frame = (alpha * self._fade_anchor.astype(np.float32)
                          + (1.0 - alpha) * frame.astype(np.float32)
                          ).clip(0, 255).astype(np.uint8)
                 self._reanchor_fade_remaining -= 1
+                if self._reanchor_fade_remaining == 0:
+                    self._fade_anchor = None   # release
             self._last_emitted_frame = frame
             self.out_q.put((block_start_ts + i * dt, frame))
 
@@ -620,13 +707,20 @@ class AvatarWorker(threading.Thread):
             #     (now - playback_delay); anything in pcm_ring past that
             #     cursor is still-pending playback. Wait for write_ts to
             #     catch up or we'll freeze the mouth mid-playout.
-            # The 45 s timer is a MINIMUM interval; defer past it.
+            # The 45 s timer is a MINIMUM; MAX_DEFER forces a reanchor if
+            # we've been waiting too long (continuous speech etc.) so model
+            # drift can't accumulate unbounded — the crossfade masks the
+            # mid-speech seam if it happens.
+            MAX_DEFER = REANCHOR_EVERY * 2   # ~90 s wall at RTF=1
             do_reanchor = False
             if blocks_since_reanchor >= REANCHOR_EVERY and self.tts_in_q.empty():
                 pb_delay = max(0.15, min(0.6, self.block_time_ewma * 1.2))
                 playback_pos = self.now() - pb_delay
                 if self.af_ring.write_ts <= playback_pos + 0.05:
                     do_reanchor = True
+            if blocks_since_reanchor >= MAX_DEFER:
+                do_reanchor = True
+                log.info(f"avatar worker: forcing reanchor (deferred {blocks_since_reanchor} blocks)")
 
             with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 if do_reanchor:
@@ -666,9 +760,19 @@ class AvatarWorker(threading.Thread):
                     # leave the video pacer holding the last pre-reanchor
                     # frame and arm a 1 s crossfade onto the next normal
                     # block's output.
+                    # Snapshot the last emitted frame as the fade anchor —
+                    # held constant through all REANCHOR_FADE_FRAMES frames
+                    # of the blend so the crossfade is a clean 1→0 mix
+                    # rather than a recursive one that produces ghosting.
+                    if self._last_emitted_frame is not None:
+                        self._fade_anchor = self._last_emitted_frame.copy()
                     self._reanchor_fade_remaining = self.REANCHOR_FADE_FRAMES
                     log.info(f"avatar worker: reanchored @ gen_t={gen_t} "
                              f"(skipped emit, fade armed {self.REANCHOR_FADE_FRAMES} frames)")
+                    if self.on_reanchor is not None:
+                        try: self.on_reanchor()
+                        except Exception:
+                            log.exception("on_reanchor callback failed")
                     blocks_since_reanchor = 0
                 else:
                     # Normal steady block: 12 frames audio context + current.
@@ -738,8 +842,8 @@ class AvatarWorker(threading.Thread):
             lead = next_block_ts - self.now()
             if lead > 0.0:
                 time.sleep(min(lead, 0.4))
-            # Run pending wav2vec batches in-thread so no GPU contention vs main
-            self._drain_tts_queue()
+            # Wav2vec now runs on a dedicated thread + side CUDA stream, so
+            # no draining is needed here. See _wav2vec_loop.
             # VRAM is stable now (start_pos pre-slice fix + inference_mode).
             # We used to empty_cache() every 20 blocks, but that was racing
             # with async kernels and producing illegal-memory-access during
