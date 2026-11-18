@@ -4,9 +4,6 @@ Real-time voice chat with a lip-synced diffusion head-avatar. Browser speaks to 
 
 Wraps [AvatarForcing](https://github.com/TaekyungKi/AvatarForcing) (Ki et al., CVPR 2026) in a voice-chat loop (Silero VAD + Smart Turn + faster-whisper STT + vLLM + Phonon TTS + wav2vec batching), plus the streaming infrastructure needed to keep the model generating indefinitely on a single GPU.
 
-Demo Video
-<iframe width="560" height="315" src="https://www.youtube.com/embed/qaVM5GoHLPA?si=Q3BWWD_7yZZCkckr" title="Demo Video" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
-
 [Blog Article: https://www.storminthecastle.com/posts/avatar-voice/](https://www.storminthecastle.com/posts/avatar-voice/)
 
 ## Architecture
