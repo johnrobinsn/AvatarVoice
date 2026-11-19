@@ -50,8 +50,9 @@ def human(n: float) -> str:
 
 
 class Item:
-    def __init__(self, name, present, fetch, note=""):
-        self.name, self.present, self.fetch, self.note = name, present, fetch, note
+    """optional: fetched automatically on first use anyway, so --check doesn't require it."""
+    def __init__(self, name, present, fetch, note="", optional=False):
+        self.name, self.present, self.fetch, self.note, self.optional = name, present, fetch, note, optional
 
 
 def hf_present(repo, revision=None, patterns=None) -> bool:
@@ -118,9 +119,8 @@ def items() -> list[Item]:
         ]
     out += [
         Item("Phonon text-to-speech voices", lambda: False, _phonon,
-             note="(fetched on first use; quick if cached)"),
-        Item("face detector (face-alignment)", lambda: False, _face_alignment,
-             note="(fetched on first use; quick if cached)"),
+             note="(checks the voice cache; quick if already fetched)", optional=True),
+        Item("face detector (face-alignment, ~100 MB)", _face_alignment_present, _face_alignment),
     ]
     return out
 
@@ -131,6 +131,12 @@ def _phonon():
     for voice in ("Harper", "Miles"):
         for _ in tts.stream("Hello.", voice=voice):
             pass
+
+
+def _face_alignment_present() -> bool:
+    import torch
+    ck = Path(torch.hub.get_dir()) / "checkpoints"
+    return any(ck.glob("s3fd-*.pth")) and any(ck.glob("2DFAN4-*.pth.tar"))
 
 
 def _face_alignment():
@@ -152,8 +158,11 @@ def main():
             print(f"  {GREEN}✓{RESET} {tag} {it.name} {DIM}(already present){RESET}")
             continue
         if args.check:
-            print(f"  {YELLOW}•{RESET} {tag} {it.name} {DIM}missing{RESET}")
-            failed.append(it.name)
+            if it.optional:
+                print(f"  {DIM}·{RESET} {tag} {it.name} {DIM}(fetched automatically when needed){RESET}")
+            else:
+                print(f"  {YELLOW}•{RESET} {tag} {it.name} {DIM}missing{RESET}")
+                failed.append(it.name)
             continue
         print(f"  {BOLD}↓{RESET} {tag} {it.name} {DIM}{it.note}{RESET}", flush=True)
         t0 = time.perf_counter()
