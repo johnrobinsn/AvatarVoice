@@ -62,7 +62,8 @@
   #gear { background: #1a1a1a; border: 1px solid #333; color: #eee;
           border-radius: 6px; padding: 2px 8px; font-size: 1rem;
           line-height: 1.2; cursor: pointer; }
-  #panel { position: fixed; top: 56px; right: 16px; width: 320px;
+  /* positioned next to the gear by placePanel() */
+  #panel { position: fixed; top: 0; left: 0; width: 320px;
            background: #111; border: 1px solid #333; border-radius: 10px;
            padding: 14px 18px; z-index: 10; display: none; }
   #panel.open { display: block; }
@@ -447,9 +448,26 @@ document.getElementById('k-reset').onclick = () => {
     document.getElementById(id).value = KNOB_DEFAULTS[k];
   }
 };
+// Open the panel to the left of the gear, bottom edges aligned, leaving the gear
+// visible so it can be clicked again to close. Falls back to the gear's right if
+// there's no room on the left, and stays inside the viewport.
+function placePanel(){
+  const panel = document.getElementById('panel');
+  if (!panel.classList.contains('open')) return;
+  const g = document.getElementById('gear').getBoundingClientRect();
+  const gap = 8, margin = 8, w = panel.offsetWidth, h = panel.offsetHeight;
+  let left = g.left - gap - w;
+  if (left < margin) left = Math.min(g.right + gap, window.innerWidth - w - margin);
+  const top = Math.max(margin, Math.min(g.bottom - h, window.innerHeight - h - margin));
+  panel.style.left = Math.max(margin, left) + 'px';
+  panel.style.top = top + 'px';
+}
 document.getElementById('gear').onclick = () => {
   document.getElementById('panel').classList.toggle('open');
+  placePanel();
 };
+window.addEventListener('resize', placePanel);
+window.addEventListener('scroll', placePanel, true);
 
 // ---- Collapsible sections (chat / log) ----
 function lastLineOfTarget(key){
