@@ -128,6 +128,35 @@ python voicechat/server.py --port 8082 --dual-gpu
 
 Open `http://<host>:8082` in a browser, pick an avatar, click **Start session**, and talk.
 
+### Running on Apple Silicon (MLX)
+
+On macOS the server defaults to `AF_BACKEND=mlx`: the flow transformer runs in MLX, the
+motion decoder and wav2vec2 in torch MPS, STT is Parakeet on MLX (as in macvoice), TTS is
+Phonon (Metal), and the LLM is `mlx_lm.server`. On an M5 MacBook Pro (32 GB) the avatar
+runs at ~200 ms per 400 ms block (~2× realtime) and replies start ~2.3–2.8 s after you stop
+talking. Details and numbers: [`mlx_port/MLX_PERF.md`](mlx_port/MLX_PERF.md).
+
+```bash
+# environment (Python 3.12) + weights — see mlx_port/README.md for the weight download
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r mlx_port/requirements-mac.txt
+uv pip install --python .venv/bin/python --no-deps transformers==4.30.2
+.venv/bin/python mlx_port/convert_weights.py \
+    --src avatarforcing/pretrained_dir/flow_transformer.pth \
+    --dst avatarforcing/pretrained_dir/flow_transformer_mlx.safetensors
+
+# LLM, in its own venv (mlx-lm needs a newer transformers)
+uv venv --python 3.12 .venv-llm && uv pip install --python .venv-llm/bin/python mlx-lm
+.venv-llm/bin/mlx_lm.server --model mlx-community/Qwen3-4B-Instruct-2507-4bit --port 8000 --prompt-cache-size 1
+
+# server
+.venv/bin/python voicechat/server.py --port 8082
+```
+
+Headless checks (no browser): `voicechat/tests/test_closed_loop_mlx.py` (in-process, full
+chain → `results/closed_loop_mlx.mp4`) and `voicechat/tests/test_webrtc_client.py` (talks
+to a running server over WebRTC → `results/webrtc_client.mp4`).
+
 ### Useful env vars
 
 | Var | Default | Notes |
@@ -136,7 +165,10 @@ Open `http://<host>:8082` in a browser, pick an avatar, click **Start session**,
 | `AF_MAE_COMPILE_MODE` | `default` | torch.compile mode for the MAE decoder. Set `reduce-overhead` for +~5% speed at the cost of ~6 GB persistent VRAM. |
 | `AF_SINGLE_GPU` | (unset) | `1` forces single-GPU; `0` forces dual-GPU. Overrides CLI flag if set. |
 | `AF_PORT` | `8082` | Server port. |
-| `AF_LLM_MODEL` | `cyankiwi/Qwen3-4B-Instruct-2507-AWQ-4bit` | LLM model served by vLLM. |
+| `AF_LLM_MODEL` | `cyankiwi/Qwen3-4B-Instruct-2507-AWQ-4bit` (mlx: `mlx-community/Qwen3-4B-Instruct-2507-4bit`) | LLM model served by vLLM / mlx_lm.server. |
+| `AF_BACKEND` | `mlx` on macOS, else `torch` | Inference backend. |
+| `AF_LLM_BASE_URL` | `http://localhost:8000/v1` | (mlx) OpenAI-compatible LLM endpoint. |
+| `AF_MLX_FLOW_DTYPE` | `float32` | (mlx) flow-transformer precision; `bfloat16` is ~25 ms/block faster but drifts further from the fp32 reference. |
 
 ### Health / debug endpoints
 
