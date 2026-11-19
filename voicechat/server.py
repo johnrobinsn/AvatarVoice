@@ -268,6 +268,19 @@ class Session:
 
 
 # ---------- Inbound track consumers ----------
+MIC_JITTER_S = 0.05
+
+
+def mic_start_ts(ring: AudioRing, start_ts: float) -> float | None:
+    """Ring start_ts for a mic frame. Frames arrive with a few ms of jitter;
+    passing their arrival time straight through makes the ring zero-fill every
+    late frame's jitter, chopping silence into the user's speech (it broke VAD
+    start-of-speech on the first words of a turn). Gaps under MIC_JITTER_S are
+    treated as jitter (append contiguously); real dropouts still zero-fill."""
+    start_ts = max(0.0, start_ts)
+    return start_ts if start_ts - ring.write_ts > MIC_JITTER_S else None
+
+
 async def consume_mic(track: MediaStreamTrack, session: Session):
     resampler = av.AudioResampler(format="flt", layout="mono", rate=16000)
     log.info(f"[{session.id}] mic consumer started")
@@ -286,7 +299,7 @@ async def consume_mic(track: MediaStreamTrack, session: Session):
             # ring.write_ts advancing so VAD doesn't stall on the wait loop.
             if session.mic_muted:
                 samples = np.zeros_like(samples)
-            session.user_audio_ring.write(samples, start_ts=max(0.0, ts - dur))
+            session.user_audio_ring.write(samples, start_ts=mic_start_ts(session.user_audio_ring, ts - dur))
 
 
 async def consume_webcam(track: MediaStreamTrack, session: Session):
