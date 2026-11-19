@@ -95,11 +95,11 @@
   <h3>Audio / VAD tuning</h3>
   <div class="knob">
     <label title="Microphone energy floor. Chunks below this are treated as silence and never shown to Silero. Raise if avatar audio bleeds into mic.">rms gate</label>
-    <input type="number" id="k-rms" step="0.001" min="0" max="0.2" value="0.015">
+    <input type="number" id="k-rms" step="0.001" min="0" max="0.3" value="0.14">
   </div>
   <div class="knob">
     <label title="Silero speech-probability threshold. Higher = stricter.">speech threshold</label>
-    <input type="number" id="k-prob" step="0.05" min="0" max="1" value="0.70">
+    <input type="number" id="k-prob" step="0.05" min="0" max="1" value="0.60">
   </div>
   <div class="knob">
     <label title="Sustained speech required before start-of-speech fires (seconds).">enter time (s)</label>
@@ -414,7 +414,7 @@ document.getElementById('start').onclick = start;
 document.getElementById('stop').onclick  = stop;
 
 // ---- Settings gear ----
-const KNOB_DEFAULTS = {rms: 0.015, prob: 0.70, enter: 0.48, lipsync: 0};
+const KNOB_DEFAULTS = {rms: 0.14, prob: 0.60, enter: 0.48, lipsync: 0};
 const KNOB_INPUTS = {rms: 'k-rms', prob: 'k-prob', enter: 'k-enter', lipsync: 'k-lipsync'};
 function loadKnobs(){
   try {

@@ -35,10 +35,11 @@ class TurnDetectorConfig:
     chunk_samples: int = 512          # 32 ms at 16 kHz; Silero native
     # Energy gate ahead of Silero. Chunks with RMS below this are forced
     # to prob=0 regardless of Silero output — kills low-volume mic-leaked
-    # avatar audio that AEC doesn't fully cancel. ~0.015 is typical for
-    # quiet room; raise to 0.03 if mic picks up a lot of ambient.
-    rms_gate: float = 0.015
-    speech_prob_threshold: float = 0.7      # per-chunk confidence cutoff — raised from 0.5 so low-volume mic-leaked avatar audio is below the bar
+    # avatar audio that AEC doesn't fully cancel. Was 0.015 (quiet room,
+    # headphones); 0.14 rejects much more speaker bleed on a laptop but needs
+    # a reasonably loud voice at the mic. Tunable live in the client's gear panel.
+    rms_gate: float = 0.14
+    speech_prob_threshold: float = 0.6      # per-chunk confidence cutoff (was 0.7; originally 0.5, raised so low-volume mic-leaked avatar audio is below the bar)
     # Transition thresholds (hysteresis):
     enter_speech_frames: int = 15     # 15 × 32 ms ≈ 480 ms of sustained (speech_prob ≥ threshold) before we fire SOS
     exit_speech_frames: int = 20      # need N consecutive silence chunks to maybe end turn
