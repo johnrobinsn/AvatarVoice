@@ -584,7 +584,17 @@ class AvatarWorker(threading.Thread):
                 if self._reanchor_fade_remaining == 0:
                     self._fade_anchor = None   # release
             self._last_emitted_frame = frame
-            self.out_q.put((block_start_ts + i * dt, frame))
+            # Blocking put, but give up once the session ends: end_session()
+            # drains the queue only once, and with nobody consuming a plain
+            # put() of the rest of the block would hang the worker forever
+            # (it never returned to idle for the next session).
+            while True:
+                try:
+                    self.out_q.put((block_start_ts + i * dt, frame), timeout=0.1)
+                    break
+                except queue.Full:
+                    if self._session_end.is_set() or self._shutdown.is_set():
+                        return
 
     # ----- main loop -----
 
