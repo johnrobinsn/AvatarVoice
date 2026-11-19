@@ -41,10 +41,14 @@ die()  {
 }
 
 # run_step LABEL WATCH_PATH CMD... — runs CMD with output to the log, showing a spinner,
-# elapsed time and (if WATCH_PATH is set) how much has been written there so far.
+# elapsed time and (if WATCH_PATH is set) how much WATCH_PATH has grown — e.g. uv's
+# download cache during package installs.
+kb() { du -sk "$1" 2>/dev/null | cut -f1 || echo 0; }
+human_kb() { awk -v k="$1" 'BEGIN { if (k >= 1048576) printf "%.1f GB", k/1048576; else if (k >= 1024) printf "%.0f MB", k/1024; else printf "%d KB", k }'; }
 run_step() {
   local label=$1 watch=$2; shift 2
-  local start=$SECONDS i=0 size="" last=-1
+  local start=$SECONDS i=0 grown="" last=-1 base=0
+  [ -n "$watch" ] && base=$(kb "$watch")
   echo "### $label: $*" >>"$LOG"
   ("$@") >>"$LOG" 2>&1 &
   local pid=$!
@@ -52,9 +56,10 @@ run_step() {
     while kill -0 "$pid" 2>/dev/null; do
       local el=$((SECONDS - start))
       if [ -n "$watch" ] && [ "$el" != "$last" ] && [ $((el % 2)) -eq 0 ]; then
-        size=$(du -sh "$watch" 2>/dev/null | cut -f1 | tr -d ' ' || true); last=$el
+        local now; now=$(kb "$watch"); last=$el
+        [ "$((now - base))" -gt 1024 ] && grown="$(human_kb $((now - base))) downloaded"
       fi
-      printf "\r  ${C}%s${X} %s ${D}%ds%s${X}\033[K" "${FRAMES[$((i % ${#FRAMES[@]}))]}" "$label" "$el" "${size:+, $size}"
+      printf "\r  ${C}%s${X} %s ${D}%ds%s${X}\033[K" "${FRAMES[$((i % ${#FRAMES[@]}))]}" "$label" "$el" "${grown:+, $grown}"
       i=$((i + 1)); sleep 0.15
     done
     printf "\r\033[K"
@@ -110,6 +115,8 @@ else
   command -v uv >/dev/null 2>&1 || die "uv installed but isn't on PATH." "Open a new terminal and re-run."
 fi
 
+UV_CACHE=$(uv cache dir 2>/dev/null || echo "$HOME/.cache/uv"); mkdir -p "$UV_CACHE"
+
 # ---------------- 3. code ----------------
 step "Getting AvatarVoice"
 if [ -d "$APP/.git" ]; then
@@ -127,18 +134,18 @@ cd "$APP"
 [ -x .venv/bin/python ] || run_step "Creating environment" "" uv venv --quiet --python "$PY" .venv \
   || die "Couldn't create a Python $PY environment."
 if [ "$PLATFORM" = mac ]; then
-  run_step "Installing PyTorch, MLX and voice-chat packages" .venv \
+  run_step "Installing PyTorch, MLX and voice-chat packages" "$UV_CACHE" \
     uv pip install --python .venv/bin/python -r mlx_port/requirements-mac.txt \
     || die "Package install failed."
   # AvatarForcing's wav2vec2 wrapper needs transformers 4.30.2, whose tokenizers pin has no
   # Python 3.12 wheels; wav2vec2 doesn't use a tokenizer, so install it without deps.
-  run_step "Installing transformers 4.30.2" .venv \
+  run_step "Installing transformers 4.30.2" "$UV_CACHE" \
     uv pip install --python .venv/bin/python --no-deps transformers==4.30.2 || die "Package install failed."
 else
-  run_step "Installing PyTorch (CUDA 12.8)" .venv \
+  run_step "Installing PyTorch (CUDA 12.8)" "$UV_CACHE" \
     uv pip install --python .venv/bin/python torch torchvision --index-url https://download.pytorch.org/whl/cu128 \
     || die "PyTorch install failed." "Check the NVIDIA driver supports CUDA 12.8 (nvidia-smi shows the max CUDA version)."
-  run_step "Installing voice-chat packages" .venv \
+  run_step "Installing voice-chat packages" "$UV_CACHE" \
     uv pip install --python .venv/bin/python -r requirements-cuda.txt || die "Package install failed."
 fi
 run_step "Checking the environment" "" .venv/bin/python -c "import torch, aiortc, voicechat.rings" \
@@ -148,11 +155,11 @@ run_step "Checking the environment" "" .venv/bin/python -c "import torch, aiortc
 if [ "$PLATFORM" = mac ]; then
   step "Language model server (mlx-lm)"
   [ -x .venv-llm/bin/python ] || run_step "Creating environment" "" uv venv --quiet --python 3.12 .venv-llm || die "Couldn't create the LLM environment."
-  run_step "Installing mlx-lm" .venv-llm uv pip install --python .venv-llm/bin/python mlx-lm || die "mlx-lm install failed."
+  run_step "Installing mlx-lm" "$UV_CACHE" uv pip install --python .venv-llm/bin/python mlx-lm || die "mlx-lm install failed."
 else
   step "Language model server (vLLM, ~8 GB)"
   [ -x .venv-llm/bin/python ] || run_step "Creating environment" "" uv venv --quiet --python 3.12 .venv-llm || die "Couldn't create the LLM environment."
-  run_step "Installing vLLM" .venv-llm uv pip install --python .venv-llm/bin/python vllm || die "vLLM install failed."
+  run_step "Installing vLLM" "$UV_CACHE" uv pip install --python .venv-llm/bin/python vllm || die "vLLM install failed."
 fi
 
 # ---------------- 6. models ----------------
