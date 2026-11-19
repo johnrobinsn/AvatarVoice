@@ -59,7 +59,17 @@ from voicechat.tts import PhononTTS, resample_24k_to_48k
 from voicechat.reply_pipeline import reply_pipeline
 from voicechat.avatar_worker import AvatarWorker
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# Log to logs/server.log, truncated fresh on every server start. We set up
+# the FileHandler explicitly (no basicConfig StreamHandler) so that launchers
+# which do "2>&1 > logs/server.log" don't double-log each line.
+_LOG_FMT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+_LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+_file_handler = logging.FileHandler(_LOG_DIR / "server.log", mode="w")
+_file_handler.setFormatter(logging.Formatter(_LOG_FMT))
+_root = logging.getLogger()
+_root.setLevel(logging.INFO)
+_root.addHandler(_file_handler)
 log = logging.getLogger("af-voice")
 
 
@@ -87,7 +97,7 @@ def _extend_rope_tables(flow_transformer, new_max_len: int = 65536):
     return replaced
 
 
-def init_singletons(avatar_ref_path: str = None):
+def init_singletons(avatar_ref_path: str = None, single_gpu: bool = False):
     global AGENT, STT, LLM, TTS, FACE_CROPPER, AVATAR_REF_TENSOR
     if AGENT is not None:
         return
@@ -104,17 +114,24 @@ def init_singletons(avatar_ref_path: str = None):
     # repo root; the submodule layout breaks that assumption, so re-root them.
     opt.wav2vec_model_path = str(AF_ROOT / opt.wav2vec_model_path)
     opt.pretrained_dir = str(AF_ROOT / opt.pretrained_dir)
-    # Multi-GPU split:
-    #   - cuda:1 = AvatarForcing (GPU-heavy, isolated for throughput)
-    #   - cuda:0 = STT, FaceCropper, vLLM (external process)
-    # Requires NOT setting CUDA_VISIBLE_DEVICES in the shell — both GPUs must
-    # be visible to this process so we can address them explicitly.
+    # GPU layout:
+    #   single (default — or if only 1 card is visible, or AF_SINGLE_GPU=1):
+    #     - cuda:0 = AvatarForcing + STT + FaceCropper (shares with vLLM)
+    #   dual (opt-in via --dual-gpu or AF_SINGLE_GPU=0):
+    #     - cuda:1 = AvatarForcing (GPU-heavy, isolated for throughput)
+    #     - cuda:0 = STT, FaceCropper, vLLM (external process)
     import torch as _torch
-    if _torch.cuda.device_count() < 2:
-        log.warning(f"only {_torch.cuda.device_count()} GPU visible — avatar + aux will share it")
+    force_single = single_gpu or os.environ.get("AF_SINGLE_GPU", "0") == "1"
+    if force_single or _torch.cuda.device_count() < 2:
+        if force_single and _torch.cuda.device_count() >= 2:
+            log.info("single-GPU mode forced — avatar + aux on cuda:0 (second card unused)")
+        elif _torch.cuda.device_count() < 2:
+            log.warning(f"only {_torch.cuda.device_count()} GPU visible — avatar + aux will share it")
         opt.rank = 0
+        aux_device = "cuda:0" if _torch.cuda.device_count() >= 2 else "cuda"
     else:
         opt.rank = 1
+        aux_device = "cuda:0"
     opt.ngpus = 1
     opt.result_dir = str(ROOT / "results/voicechat")
     opt.compile = True
@@ -132,9 +149,8 @@ def init_singletons(avatar_ref_path: str = None):
     # access race. Re-enable if we switch to a dialog/user-mirroring mode.
     FACE_CROPPER = None
 
-    log.info("loading Whisper STT on cuda:0")
-    stt_device = "cuda:0" if _torch.cuda.device_count() >= 2 else "cuda"
-    STT = WhisperSTT(device=stt_device)
+    log.info(f"loading Whisper STT on {aux_device}")
+    STT = WhisperSTT(device=aux_device)
 
     log.info("loading Phonon TTS")
     TTS = PhononTTS()
@@ -545,6 +561,31 @@ async def index(request):
     return web.Response(text=html, content_type="text/html")
 
 
+async def memory_stats(request):
+    import torch as _torch
+    out = {}
+    for i in range(_torch.cuda.device_count()):
+        allocated = _torch.cuda.memory_allocated(i)
+        reserved = _torch.cuda.memory_reserved(i)
+        max_allocated = _torch.cuda.max_memory_allocated(i)
+        max_reserved = _torch.cuda.max_memory_reserved(i)
+        total = _torch.cuda.get_device_properties(i).total_memory
+        out[f"cuda:{i}"] = {
+            "device_name": _torch.cuda.get_device_name(i),
+            "allocated_gb": round(allocated / 1e9, 3),
+            "reserved_gb": round(reserved / 1e9, 3),
+            "max_allocated_gb": round(max_allocated / 1e9, 3),
+            "max_reserved_gb": round(max_reserved / 1e9, 3),
+            "total_gb": round(total / 1e9, 3),
+            "reserved_pct": round(100 * reserved / total, 1),
+        }
+    # Enable torch's per-category breakdown if asked
+    if request.query.get("full") == "1":
+        for i in range(_torch.cuda.device_count()):
+            out[f"cuda:{i}"]["summary"] = _torch.cuda.memory_summary(i, abbreviated=True)
+    return web.json_response(out)
+
+
 AVATAR_CATALOG = [
     {"id": "rumi",  "file": "rumi.jpg",       "name": "Rumi",  "gender": "female"},
     {"id": "kelly", "file": "kelly.jpg",      "name": "Kelly", "gender": "female"},
@@ -793,15 +834,27 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(os.environ.get("AF_PORT", 8082)))
     ap.add_argument("--host", default="0.0.0.0")
+    # Default: single-GPU mode — avatar + aux share cuda:0, even when 2 cards
+    # are visible. Pass --dual-gpu to split (avatar on cuda:1, aux on cuda:0).
+    # Also settable via AF_SINGLE_GPU=0 / AF_SINGLE_GPU=1.
+    ap.add_argument("--dual-gpu", action="store_true",
+                    help="Split onto 2 GPUs: avatar on cuda:1, aux on cuda:0. Default is single-GPU on cuda:0.")
     args = ap.parse_args()
+    # Single-gpu defaults to True unless --dual-gpu is passed or AF_SINGLE_GPU=0 is set.
+    env_single = os.environ.get("AF_SINGLE_GPU")
+    if env_single is not None:
+        single_gpu = env_single == "1"
+    else:
+        single_gpu = not args.dual_gpu
 
     # Eager singleton load so first browser doesn't eat warmup
-    init_singletons()
+    init_singletons(single_gpu=single_gpu)
 
     app = web.Application()
     app.router.add_get("/", index)
     app.router.add_get("/avatar-ref.jpg", avatar_ref)
     app.router.add_get("/avatars", list_avatars)
+    app.router.add_get("/memory", memory_stats)
     app.router.add_get("/thumb/{id}", thumb)
     app.router.add_post("/set-avatar", set_avatar)
     app.router.add_post("/offer", offer)

@@ -711,7 +711,7 @@ class AvatarWorker(threading.Thread):
             # we've been waiting too long (continuous speech etc.) so model
             # drift can't accumulate unbounded — the crossfade masks the
             # mid-speech seam if it happens.
-            MAX_DEFER = REANCHOR_EVERY * 2   # ~90 s wall at RTF=1
+            MAX_DEFER = 162   # ~65 s wall at RTF=1 (hard cap; fires mid-speech if hit)
             do_reanchor = False
             if blocks_since_reanchor >= REANCHOR_EVERY and self.tts_in_q.empty():
                 pb_delay = max(0.15, min(0.6, self.block_time_ewma * 1.2))
