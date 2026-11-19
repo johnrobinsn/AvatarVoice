@@ -43,7 +43,8 @@ die()  {
 # run_step LABEL WATCH_PATH CMD... — runs CMD with output to the log, showing a spinner,
 # elapsed time and (if WATCH_PATH is set) how much WATCH_PATH has grown — e.g. uv's
 # download cache during package installs.
-kb() { du -sk "$1" 2>/dev/null | cut -f1 || echo 0; }
+# size in KB as exactly one number (du may fail mid-scan while files churn; never abort the script)
+kb() { du -sk "$1" 2>/dev/null | awk 'NR==1 {print $1; f=1} END {if (!f) print 0}' || true; }
 human_kb() { awk -v k="$1" 'BEGIN { if (k >= 1048576) printf "%.1f GB", k/1048576; else if (k >= 1024) printf "%.0f MB", k/1024; else printf "%d KB", k }'; }
 run_step() {
   local label=$1 watch=$2; shift 2
