@@ -46,6 +46,7 @@ import numpy as np
 import torch
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, VideoStreamTrack, RTCConfiguration
+from aiortc.mediastreams import MediaStreamError
 from scipy import signal as _scipy_signal
 from omegaconf import OmegaConf
 
@@ -478,11 +479,26 @@ class AvatarAudioTrack(MediaStreamTrack):
                 try: self._out_q.put_nowait(samples_s16)
                 except queue.Full: pass
 
+    def _next_chunk(self):
+        """Blocking pop for the executor. Polls the stop flag: a plain get()
+        pending when the track stops would block its default-executor thread
+        forever — one leaked thread per session until the pool (cpu_count+4)
+        is exhausted, after which everything on the default executor hangs
+        (httpx's getaddrinfo for the LLM, aiortc's encoders) and the process
+        can't exit on SIGTERM."""
+        while not self._thread_stop.is_set():
+            try:
+                return self._out_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+        return None
+
     async def recv(self):
         loop = asyncio.get_running_loop()
-        # Pop the next pre-paced chunk. Thread-safe queue.get blocks until
-        # one is available; the pacer thread produces at precise 20 ms.
-        samples_s16 = await loop.run_in_executor(None, self._out_q.get)
+        # Pop the next pre-paced chunk; the pacer thread produces at precise 20 ms.
+        samples_s16 = await loop.run_in_executor(None, self._next_chunk)
+        if samples_s16 is None:
+            raise MediaStreamError
         frame = av.AudioFrame.from_ndarray(samples_s16.reshape(1, -1), format="s16", layout="mono")
         frame.sample_rate = self.OUT_SR
         frame.pts = self._pts
