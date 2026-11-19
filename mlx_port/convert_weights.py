@@ -12,7 +12,8 @@ What it does:
   3. Unpacks nn.MultiheadAttention's packed in_proj_weight into separate
      query/key/value Linear weights (MLX's nn.MultiHeadAttention uses split
      Linears, PyTorch uses a packed one).
-  4. Saves as safetensors (fp32 arrays, cast at load time on MLX side).
+  4. Drops the static mask buffers and any keys outside `flow_transformer.`.
+  5. Saves as safetensors (fp32 arrays, cast at load time on MLX side).
 
 After conversion, inspect with:
     python -c "from safetensors.numpy import load_file; d = load_file('.../flow_transformer_mlx.safetensors'); [print(k, v.shape, v.dtype) for k,v in d.items()]"
@@ -29,15 +30,19 @@ import torch
 from safetensors.numpy import save_file
 
 
-# Keys in PyTorch that need renaming before save.  Empty for now — we expect
-# most keys to map 1:1 since the MLX module tree mirrors PyTorch's structure.
-# Fill in as you discover divergences during Phase 2.
-RENAME_MAP: dict[str, str] = {
-    # Example (hypothetical):
-    # "blocks.0.attn.freqs_cis": DROP,   # buffer, regenerated at init
-}
-
 DROP = "__DROP__"
+
+# The checkpoint is a full AvatarForcing state_dict; only keys under this prefix
+# belong to the flow transformer (the rest is audio_encoder.audio_projection).
+PREFIX = "flow_transformer."
+
+# Keys (after prefix stripping) that differ between the PyTorch and MLX module
+# trees.  The MLX tree mirrors nn.Sequential with plain lists, so everything else
+# maps 1:1.
+RENAME_MAP: dict[str, str] = {
+    "alignment_mask": DROP,                        # static buffer, rebuilt at init
+    "block_bidir_causal_lookahead_mask": DROP,     # static buffer, rebuilt at init
+}
 
 
 def unpack_mha(packed_weight: np.ndarray, packed_bias: np.ndarray | None, embed_dim: int):
@@ -78,6 +83,9 @@ def main():
     print(f"Loading PyTorch weights from {src} ...")
     sd = torch.load(src, map_location="cpu", weights_only=True)
     print(f"  loaded {len(sd)} keys")
+    if any(k.startswith(PREFIX) for k in sd):
+        sd = {k[len(PREFIX):]: v for k, v in sd.items() if k.startswith(PREFIX)}
+        print(f"  kept {len(sd)} keys under '{PREFIX}'")
 
     out: dict[str, np.ndarray] = {}
     renamed = dropped = unpacked = 0

@@ -4,10 +4,13 @@
   - adaLN modulate
 
 Keep these simple and well-tested — everything else depends on them.
+
+Note: the model's hot path uses `mx.fast.rope(traditional=True, offset=start_pos)`
+rather than the table-based helpers below.  It computes the same interleaved-pair
+rotation as PyTorch's view_as_complex path, without a precomputed table (so no
+max_seq_len limit).  The table-based helpers are kept for equivalence testing.
 """
 from __future__ import annotations
-
-import math
 
 import mlx.core as mx
 
@@ -27,43 +30,50 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> mx.array
     """
     if dim % 2 != 0:
         raise ValueError("RoPE dim must be even.")
-    # TODO: implement
-    # idx = mx.arange(0, dim, 2)[: (dim // 2)].astype(mx.float32)
-    # inv_freq = 1.0 / (theta ** (idx / dim))
-    # t = mx.arange(end).astype(mx.float32)
-    # freqs = mx.outer(t, inv_freq)          # (end, dim/2)
-    # Return complex polar form.  MLX: mx.exp(1j * freqs) is one way; or build
-    # from cos/sin and view-as-complex.  Dtype complex64.
-    raise NotImplementedError
+    idx = mx.arange(0, dim, 2)[: (dim // 2)].astype(mx.float32)
+    inv_freq = 1.0 / (theta ** (idx / dim))
+    t = mx.arange(end).astype(mx.float32)
+    freqs = mx.outer(t, inv_freq)                     # (end, dim/2)
+    return mx.cos(freqs) + 1j * mx.sin(freqs)          # complex64
+
+
+def _apply_rotary(x: mx.array, freqs_cis_n: mx.array) -> mx.array:
+    """Rotate interleaved (even, odd) pairs of the last axis by freqs_cis_n.
+
+    Real-valued form of PyTorch's view_as_complex(x) * freqs_cis.
+      x: (B, H, N, D);  freqs_cis_n: (N, D/2) complex64
+    """
+    B, H, N, D = x.shape
+    cos = mx.real(freqs_cis_n).reshape(1, 1, N, D // 2)
+    sin = mx.imag(freqs_cis_n).reshape(1, 1, N, D // 2)
+    pair = x.astype(mx.float32).reshape(B, H, N, D // 2, 2)
+    xr, xi = pair[..., 0], pair[..., 1]
+    out = mx.stack([xr * cos - xi * sin, xr * sin + xi * cos], axis=-1)
+    return out.reshape(B, H, N, D).astype(x.dtype)
 
 
 def apply_rotary_emb_q(xq: mx.array, freqs_cis_n: mx.array) -> mx.array:
-    """Apply rotary to Q only.
-
-    Shapes:
-      xq: (B, H, N, D)  — D must be even
-      freqs_cis_n: (N, D/2) complex64 — already sliced for the current window
-
-    PyTorch reference (flow_transformer.py:76-84).  Note that PyTorch uses
-    view_as_complex/view_as_real; in MLX, either do the same (if complex dtype
-    supports it) or decompose into (cos, sin) pair:
-        xq_pair = xq.reshape(B, H, N, D//2, 2)
-        real = xq_pair[..., 0] * cos - xq_pair[..., 1] * sin
-        imag = xq_pair[..., 0] * sin + xq_pair[..., 1] * cos
-        return mx.stack([real, imag], axis=-1).reshape(B, H, N, D)
-    """
-    # TODO
-    raise NotImplementedError
+    """Apply rotary to Q.  PyTorch reference: flow_transformer.py:76-84."""
+    return _apply_rotary(xq, freqs_cis_n)
 
 
 def apply_rotary_emb_k(xk: mx.array, freqs_cis_n: mx.array) -> mx.array:
-    """Apply rotary to K only.  Same math as Q, kept separate to match the
-    PyTorch-side split (flow_transformer.py:86-93)."""
-    # TODO
-    raise NotImplementedError
+    """Apply rotary to K.  PyTorch reference: flow_transformer.py:86-93."""
+    return _apply_rotary(xk, freqs_cis_n)
 
 
 # ---------- Masks ----------
+
+def make_block_bidir_causal_lookahead_mask(T: int, local_len: int, lookahead: int = 2) -> mx.array:
+    """Static (T, T) self-attention mask.  PyTorch: flow_transformer.py:25-31.
+
+    This is the mask actually used by FlowTransformer: the full (50, 50) matrix
+    at warmup, and its last (num_frames_per_block + 2) rows at steady state.
+    """
+    q = mx.arange(T)[:, None]
+    k = mx.arange(T)[None, :]
+    return ((k // local_len) < (q // local_len)) | (k <= q + lookahead)
+
 
 def make_block_bidir_causal_lookahead_mask_window(
     start_pos: int,
@@ -72,18 +82,15 @@ def make_block_bidir_causal_lookahead_mask_window(
     local_len: int,
     lookahead: int = 2,
 ) -> mx.array:
-    """Self-attention mask used by `Attention`.
+    """Windowed self-attention mask.  PyTorch: flow_transformer.py:33-39.
 
-    PyTorch reference (flow_transformer.py:33-39):
-        q_abs = torch.arange(start_pos, start_pos + n_tokens)[:, None]
-        k_abs = torch.arange(start_pos - cache_len, start_pos + n_tokens)[None, :]
-        q_blk = q_abs // local_len
-        k_blk = k_abs // local_len
-        allow = (k_blk < q_blk) | (k_abs <= q_abs + lookahead)
-        return allow                  # shape (n_tokens, cache_len + n_tokens)
+    Unused by the PyTorch inference path (kept for parity).
     """
-    # TODO
-    raise NotImplementedError
+    q_abs = mx.arange(start_pos, start_pos + n_tokens)[:, None]
+    k_abs = mx.arange(start_pos - cache_len, start_pos + n_tokens)[None, :]
+    q_blk = mx.floor_divide(q_abs, local_len)
+    k_blk = mx.floor_divide(k_abs, local_len)
+    return (k_blk < q_blk) | (k_abs <= q_abs + lookahead)
 
 
 def enc_dec_mask_window(
@@ -92,16 +99,10 @@ def enc_dec_mask_window(
     n_tokens: int,
     expansion: int,
 ) -> mx.array:
-    """Cross-attention mask: local window around each Q position.
-
-    PyTorch reference (flow_transformer.py:19-23):
-        q_abs = torch.arange(start_pos, start_pos + n_tokens)[:, None]
-        k_abs = torch.arange(start_pos - cache_len, start_pos + n_tokens)[None, :]
-        allow = (k_abs >= q_abs - expansion) & (k_abs <= q_abs + expansion)
-        return allow
-    """
-    # TODO
-    raise NotImplementedError
+    """Windowed cross-attention mask.  PyTorch: flow_transformer.py:19-23."""
+    q_abs = mx.arange(start_pos, start_pos + n_tokens)[:, None]
+    k_abs = mx.arange(start_pos - cache_len, start_pos + n_tokens)[None, :]
+    return (k_abs >= q_abs - expansion) & (k_abs <= q_abs + expansion)
 
 
 def enc_dec_mask(T: int, S: int, frame_width: int = 1, expansion: int = 2) -> mx.array:
@@ -113,8 +114,18 @@ def enc_dec_mask(T: int, S: int, frame_width: int = 1, expansion: int = 2) -> mx
             mask[i, max(0, (i - expansion) * frame_width):(i + expansion + 1) * frame_width] = 0
         return mask == 0
     """
-    # TODO
-    raise NotImplementedError
+    q = mx.arange(T)[:, None]
+    k = mx.arange(S)[None, :]
+    lo = mx.maximum(0, (q - expansion) * frame_width)
+    hi = (q + expansion + 1) * frame_width
+    return (k >= lo) & (k < hi)
+
+
+def cross_mask_local(q_len: int = 10, cache_len: int = 2, expansion: int = 2) -> mx.array:
+    """Steady-state cross-attention mask.  PyTorch: CrossAttention.cross_mask_local."""
+    q = mx.arange(q_len)[:, None]
+    k = mx.arange(cache_len + q_len)[None, :]
+    return mx.abs(k - (q + cache_len)) <= expansion
 
 
 # ---------- Modulation ----------
