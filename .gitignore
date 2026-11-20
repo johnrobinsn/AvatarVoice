@@ -5,6 +5,10 @@ __pycache__/
 results/
 *.log
 /tmp/voicechat_*.log
+.venv-llm/
+logs/
+.DS_Store
 # Per-machine AOTInductor build artifacts (rebuild locally with scripts/compile_aot.py)
 compiled_models/
 *.pt2
+.run/

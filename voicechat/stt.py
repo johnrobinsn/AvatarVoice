@@ -21,6 +21,9 @@ Historical: an earlier attempt to use NVIDIA Parakeet via NeMo crashed the
 CUDA-graph decoder with an illegal-memory-access on the second transcribe()
 call after any empty_cache() (NeMo issue #16325, open PR #16330). The
 onnx-asr + onnxruntime-gpu path sidesteps that entirely.
+
+On Apple Silicon (AF_BACKEND=mlx) the server uses `ParakeetMLXSTT` instead: the same
+Parakeet-TDT-0.6b-v2 weights on MLX via parakeet-mlx (8-bit encoder), as in macvoice.
 """
 from __future__ import annotations
 
@@ -141,6 +144,64 @@ class ParakeetSTT:
         text = self._model.recognize(audio, sample_rate=16000).strip()
         dt = (time.perf_counter() - t0) * 1000
         log.info(f"stt: {audio.shape[0] / 16000:.2f}s audio -> {dt:.1f}ms  text={text!r}")
+        return text
+
+    async def transcribe(self, audio: np.ndarray, language: str = "en") -> str:
+        """Audio: f32 PCM mono at 16 kHz."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor, self._blocking_transcribe, audio, language)
+
+
+
+class ParakeetMLXSTT:
+    """Parakeet TDT 0.6B v2 on MLX (Apple Silicon), 8-bit encoder — the
+    macvoice configuration. Same async API as WhisperSTT.
+
+    ~45-100 ms for 2-7 s utterances on an M5 (vs ~350-450 ms for Whisper
+    large-v3-turbo on MLX), ~1.1 GB. English only (`language` is ignored).
+
+    MLX streams are thread-local, so the model is loaded and run on one
+    dedicated executor thread. Used by the Apple Silicon backend (AF_BACKEND=mlx).
+    """
+    REPO = "johnrobinsn/parakeet-tdt-0.6b-v2-mlx-q8"
+    REVISION = "aad991e02731e67298700cf1f2b86ddaa45dd18c"
+
+    def __init__(self, repo: str = REPO, revision: str | None = REVISION):
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="af-stt")
+        log.info(f"loading Parakeet ({repo})")
+        t0 = time.perf_counter()
+        self._model = self._executor.submit(self._load, repo, revision).result()
+        log.info(f"loaded in {time.perf_counter()-t0:.2f}s")
+
+    @staticmethod
+    def _load(repo: str, revision: str | None):
+        import json
+        import mlx.core as mx
+        import mlx.nn as nn
+        from huggingface_hub import hf_hub_download
+        from parakeet_mlx.utils import from_config
+        cfg, weights = (hf_hub_download(repo, f, revision=revision)
+                        for f in ("config.json", "model.safetensors"))
+        with open(cfg) as f:
+            model = from_config(json.load(f))
+        # Quantize the freshly built encoder first so it has the saved
+        # weights' shapes; its random init is lazy and never computed.
+        nn.quantize(model.encoder, group_size=64, bits=8)
+        model.load_weights(weights)
+        mx.eval(model.parameters())
+        return model
+
+    def _blocking_transcribe(self, audio: np.ndarray, language: str = "en") -> str:
+        import mlx.core as mx
+        from parakeet_mlx.audio import get_logmel
+        t0 = time.perf_counter()
+        mel = get_logmel(mx.array(np.asarray(audio, dtype=np.float32)), self._model.preprocessor_config)
+        results = self._model.generate(mel)
+        text = results[0].text.strip() if results else ""
+        dt = (time.perf_counter() - t0) * 1000
+        log.info(f"stt: {audio.shape[0]/16000:.2f}s audio -> {dt:.1f}ms  text={text!r}")
         return text
 
     async def transcribe(self, audio: np.ndarray, language: str = "en") -> str:

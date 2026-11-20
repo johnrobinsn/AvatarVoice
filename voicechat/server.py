@@ -60,6 +60,10 @@ from voicechat.tts import PhononTTS, resample_24k_to_48k
 from voicechat.reply_pipeline import reply_pipeline
 from voicechat.avatar_worker import AvatarWorker
 
+# Inference backend: "torch" (CUDA, the original path) or "mlx" (Apple Silicon:
+# MLX flow transformer + torch-MPS decoder, Parakeet STT, mlx_lm.server LLM).
+BACKEND = os.environ.get("AF_BACKEND", "mlx" if sys.platform == "darwin" else "torch")
+
 # Log to logs/server.log, truncated fresh on every server start. We set up
 # the FileHandler explicitly (no basicConfig StreamHandler) so that launchers
 # which do "2>&1 > logs/server.log" don't double-log each line.
@@ -100,10 +104,77 @@ def _extend_rope_tables(flow_transformer, new_max_len: int = 65536):
     return replaced
 
 
+def _load_opt():
+    class Opt: pass
+    opt = Opt()
+    cfg = OmegaConf.load(str(AF_ROOT / "configs/inference.yaml"))
+    for k, v in cfg.items(): setattr(opt, k, v)
+    opt.infer_config = str(AF_ROOT / "configs/inference.yaml")
+    opt.wav2vec_model_path = str(AF_ROOT / opt.wav2vec_model_path)
+    opt.pretrained_dir = str(AF_ROOT / opt.pretrained_dir)
+    return opt
+
+
+def _preprocess_avatar(path) -> torch.Tensor:
+    sample = AGENT.data_processor.preprocess(
+        avatar_ref_path   = str(path),
+        avatar_audio_path = str(AF_ROOT / "data/avatar.wav"),
+        user_audio_path   = str(AF_ROOT / "data/user.wav"),
+        user_video_path   = str(AF_ROOT / "data/user/"),
+    )
+    return sample["avatar_ref"]
+
+
+def init_singletons_mlx(avatar_ref_path: str = None):
+    """Apple-Silicon singletons: MLX avatar worker, Parakeet STT, Phonon TTS,
+    and an OpenAI-compatible LLM client (mlx_lm.server by default)."""
+    global AGENT, STT, LLM, TTS, FACE_CROPPER, AVATAR_REF_TENSOR, AVATAR_WORKER
+    import types
+    import inference
+    from voicechat.stt import ParakeetMLXSTT
+    from voicechat.avatar_worker_mlx import MLXAvatarWorker
+
+    opt = _load_opt()
+    # DataProcessor (portrait face-detect + crop) builds face_alignment with
+    # its default device, CUDA. Build it on the CPU instead; it only runs at
+    # startup and on /set-avatar.
+    fa_cls = inference.face_alignment.FaceAlignment
+    inference.face_alignment.FaceAlignment = lambda *a, **k: fa_cls(*a, **{**k, "device": "cpu"})
+    try:
+        dp = inference.DataProcessor(opt)
+    finally:
+        inference.face_alignment.FaceAlignment = fa_cls
+    AGENT = types.SimpleNamespace(data_processor=dp, G=None)
+    FACE_CROPPER = None
+
+    log.info("loading Parakeet STT (MLX)")
+    STT = ParakeetMLXSTT()
+    log.info("loading Phonon TTS")
+    TTS = PhononTTS()
+    log.info("creating LLM client")
+    LLM = VLLMClient(model=os.environ.get("AF_LLM_MODEL", "mlx-community/Qwen3-4B-Instruct-2507-4bit"),
+                     base_url=os.environ.get("AF_LLM_BASE_URL", "http://localhost:8000/v1"))
+
+    ref_path = avatar_ref_path or str(ROOT / "data/rumi.jpg")
+    log.info(f"preprocessing avatar ref: {ref_path}")
+    AVATAR_REF_TENSOR = _preprocess_avatar(ref_path)
+
+    log.info("starting persistent avatar worker (mlx; warmup will run now)")
+    AVATAR_WORKER = MLXAvatarWorker(avatar_ref_tensor=AVATAR_REF_TENSOR)
+    AVATAR_WORKER.start()
+    AVATAR_WORKER._warmup_done.wait()
+    if AVATAR_WORKER.pipe is None:
+        raise RuntimeError("MLX avatar worker failed to warm up (see log)")
+    log.info("avatar worker ready")
+    _preload_avatar_tensors()
+
+
 def init_singletons(avatar_ref_path: str = None, single_gpu: bool = False):
     global AGENT, STT, LLM, TTS, FACE_CROPPER, AVATAR_REF_TENSOR
     if AGENT is not None:
         return
+    if BACKEND == "mlx":
+        return init_singletons_mlx(avatar_ref_path)
 
     # Load Parakeet STT FIRST so onnxruntime-gpu creates its CUDA/cuBLAS
     # context on a clean device. If torch initializes CUDA first, ORT's
@@ -615,6 +686,14 @@ async def index(request):
 
 async def memory_stats(request):
     import torch as _torch
+    if BACKEND == "mlx":
+        import mlx.core as mx
+        return web.json_response({
+            "mlx": {"active": mx.get_active_memory(), "peak": mx.get_peak_memory(),
+                    "cache": mx.get_cache_memory()},
+            "mps": {"allocated": _torch.mps.current_allocated_memory(),
+                    "driver": _torch.mps.driver_allocated_memory()},
+        })
     out = {}
     for i in range(_torch.cuda.device_count()):
         allocated = _torch.cuda.memory_allocated(i)
@@ -638,10 +717,11 @@ async def memory_stats(request):
     return web.json_response(out)
 
 
+# Portrait sources: data/CREDITS.md. "gender" picks the TTS voice and the persona prompt.
 AVATAR_CATALOG = [
-    {"id": "rumi",  "file": "rumi.jpg",       "name": "Rumi",  "gender": "female"},
-    {"id": "kelly", "file": "kelly.jpg",      "name": "Kelly", "gender": "female"},
-    {"id": "ken",  "file": "ken.jpg", "name": "Ken",  "gender": "male"},
+    {"id": "rumi",  "file": "rumi.jpg",  "name": "Rumi",  "gender": "female"},
+    {"id": "vicky", "file": "vicky.jpg", "name": "Vicky", "gender": "female"},
+    {"id": "ken",   "file": "ken.jpg",   "name": "Ken",   "gender": "male"},
 ]
 # Currently selected (updated by /set-avatar).
 CURRENT_AVATAR = {"id": "rumi", "file": "rumi.jpg", "name": "Rumi", "gender": "female"}
@@ -660,13 +740,7 @@ def _preload_avatar_tensors():
             continue
         try:
             t0 = time.perf_counter()
-            sample = AGENT.data_processor.preprocess(
-                avatar_ref_path   = str(path),
-                avatar_audio_path = str(AF_ROOT / "data/avatar.wav"),
-                user_audio_path   = str(AF_ROOT / "data/user.wav"),
-                user_video_path   = str(AF_ROOT / "data/user/"),
-            )
-            AVATAR_TENSORS[entry["id"]] = sample["avatar_ref"]
+            AVATAR_TENSORS[entry["id"]] = _preprocess_avatar(path)
             log.info(f"preloaded avatar '{entry['id']}' in {(time.perf_counter()-t0)*1000:.0f}ms")
         except Exception as e:
             log.exception(f"preloading avatar '{entry['id']}' failed: {e}")
