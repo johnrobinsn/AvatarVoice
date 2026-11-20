@@ -141,14 +141,18 @@ run_step "Checking the environment" "" .venv/bin/python -c "import torch, aiortc
   || die "The environment doesn't import cleanly."
 
 # ---------------- 5. LLM environment ----------------
+# --no-config: the LLM venv is separate from the project's — don't apply pyproject.toml's
+# [tool.uv] settings (its tokenizers override would break mlx-lm / vLLM).
 if [ "$PLATFORM" = mac ]; then
   step "Language model server (mlx-lm)"
-  [ -x .venv-llm/bin/python ] || run_step "Creating environment" "" uv venv --quiet --python 3.12 .venv-llm || die "Couldn't create the LLM environment."
-  run_step "Installing mlx-lm" "$UV_CACHE" uv pip install --python .venv-llm/bin/python mlx-lm || die "mlx-lm install failed."
+  [ -x .venv-llm/bin/python ] || run_step "Creating environment" "" uv venv --no-config --quiet --python 3.12 .venv-llm || die "Couldn't create the LLM environment."
+  run_step "Installing mlx-lm" "$UV_CACHE" uv pip install --no-config --python .venv-llm/bin/python mlx-lm || die "mlx-lm install failed."
+  run_step "Checking the LLM environment" "" .venv-llm/bin/python -c "import mlx_lm.server" || die "mlx-lm doesn't import cleanly."
 else
   step "Language model server (vLLM, ~8 GB)"
-  [ -x .venv-llm/bin/python ] || run_step "Creating environment" "" uv venv --quiet --python 3.12 .venv-llm || die "Couldn't create the LLM environment."
-  run_step "Installing vLLM" "$UV_CACHE" uv pip install --python .venv-llm/bin/python vllm || die "vLLM install failed."
+  [ -x .venv-llm/bin/python ] || run_step "Creating environment" "" uv venv --no-config --quiet --python 3.12 .venv-llm || die "Couldn't create the LLM environment."
+  run_step "Installing vLLM" "$UV_CACHE" uv pip install --no-config --python .venv-llm/bin/python vllm || die "vLLM install failed."
+  run_step "Checking the LLM environment" "" .venv-llm/bin/vllm --version || die "vLLM doesn't run cleanly."
 fi
 
 # ---------------- 6. models ----------------

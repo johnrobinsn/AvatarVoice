@@ -147,13 +147,14 @@ transformer. Skips anything already present; `--check` lists what's missing.
 
 ### 4. LLM server environment
 
-The LLM server gets its own venv (it needs newer packages than the avatar):
+The LLM server gets its own venv (it needs newer packages than the avatar). `--no-config` keeps
+the project's `pyproject.toml` settings out of it:
 
 ```bash
 # Linux + NVIDIA
-uv venv --python 3.12 .venv-llm && uv pip install --python .venv-llm/bin/python vllm
+uv venv --no-config --python 3.12 .venv-llm && uv pip install --no-config --python .venv-llm/bin/python vllm
 # macOS + Apple Silicon
-uv venv --python 3.12 .venv-llm && uv pip install --python .venv-llm/bin/python mlx-lm
+uv venv --no-config --python 3.12 .venv-llm && uv pip install --no-config --python .venv-llm/bin/python mlx-lm
 ```
 
 ### 5. Run
