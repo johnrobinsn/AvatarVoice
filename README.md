@@ -95,6 +95,24 @@ AvatarVoice/
 └── avatarforcing/           submodule → johnrobinsn/AvatarForcing (fork of TaekyungKi's)
 ```
 
+## Quick install
+
+macOS (Apple Silicon) or Linux (NVIDIA GPU):
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/johnrobinsn/AvatarVoice/main/install.sh | bash
+avatarvoice run          # starts the LLM + voice servers and opens your browser; Ctrl-C stops
+```
+
+The installer checks your machine, sets up private Python environments with [uv](https://docs.astral.sh/uv/)
+in `~/.avatarvoice` (nothing system-wide), downloads the models (~4–6 GB) and adds an `avatarvoice`
+command (`run`, `status`, `stop`, `logs`, `download`, `update`, `uninstall`). It shows progress as it goes and
+keeps a log in `~/.avatarvoice/install.log`; re-running it resumes or updates. On a Mac with a fast
+connection it takes a few minutes. Options: `AVATARVOICE_HOME` (install location), `AVATARVOICE_REF`
+(branch or tag).
+
+The sections below set things up by hand instead.
+
 ## Running
 
 ### 1. Clone with submodule
