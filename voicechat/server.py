@@ -152,15 +152,15 @@ def init_singletons(avatar_ref_path: str = None, single_gpu: bool = False):
     # access race. Re-enable if we switch to a dialog/user-mirroring mode.
     FACE_CROPPER = None
 
-    # AF_STT: "whisper" (default) or "parakeet".
-    # Parakeet (via onnx-asr) loads in ~2 s vs Whisper's ~15 s and matches
-    # the Mac/MLX backend's STT weights. English-only on the v2 model.
+    # AF_STT: "parakeet" (default) or "whisper".
+    # Parakeet (via onnx-asr) loads in ~1 s vs Whisper's ~15 s and matches
+    # the Mac/MLX backend's STT weights (same TDT-0.6b-v2). English-only.
     #
     # Parakeet is loaded LAZILY here (after the avatar worker warmup) because
     # onnxruntime-gpu's CUDA context interferes with torch's AOTI/compile CUDA
     # graph capture — co-loading them adds ~11 s to avatar warmup. Whisper
     # uses ctranslate2 which doesn't have the same contention.
-    stt_backend = os.environ.get("AF_STT", "whisper").lower()
+    stt_backend = os.environ.get("AF_STT", "parakeet").lower()
     _load_parakeet_later = False
     if stt_backend == "parakeet":
         _load_parakeet_later = True
