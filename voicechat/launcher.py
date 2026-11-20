@@ -114,7 +114,8 @@ def terminate(proc_or_pid, name, timeout=15):
         return
     try:
         os.killpg(pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):   # already gone, or exiting under another stopper
+        (RUN / f"{name}.pid").unlink(missing_ok=True)
         return
     t0 = time.time()
     while time.time() - t0 < timeout and pid_alive(pid):
@@ -124,7 +125,7 @@ def terminate(proc_or_pid, name, timeout=15):
     if pid_alive(pid):
         try:
             os.killpg(pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
     (RUN / f"{name}.pid").unlink(missing_ok=True)
 

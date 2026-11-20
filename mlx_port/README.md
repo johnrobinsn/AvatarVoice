@@ -8,7 +8,7 @@ and `torch.compile`). See `../SPEC_MLX_PORT.md` for the plan and
 **Status:** port complete and verified. Full pipeline at **210 ms EWMA per 10-frame
 block (1.9× realtime)** on a base M5, per-frame SSIM 0.9975 vs the fp32 PyTorch
 reference. Wired into the voice-chat demo via `voicechat/avatar_worker_mlx.py` (`AF_BACKEND=mlx`,
-the default on macOS) — see the top-level README, "Running on Apple Silicon".
+the default on macOS) — see "Quick install" / "Manual install" in the top-level README.
 
 ## Layout
 

@@ -84,11 +84,14 @@ On Apple Silicon (details in [`mlx_port/MLX_PERF.md`](mlx_port/MLX_PERF.md)):
 ```
 AvatarVoice/
 ├── README.md                this file
+├── install.sh               one-line installer (macOS + Linux)
+├── pyproject.toml, uv.lock  Python environment for both platforms (uv sync)
 ├── SPEC_MLX_PORT.md         original design doc for the MLX / Apple Silicon port
 ├── voicechat/               WebRTC server, VAD, STT, LLM, TTS, workers (avatar_worker.py: CUDA,
-│                            avatar_worker_mlx.py: Apple Silicon), rings, browser client, tests
+│                            avatar_worker_mlx.py: Apple Silicon), rings, browser client,
+│                            launcher.py (the `avatarvoice` command), tests
 ├── webrtc/                  earlier single-track streaming demo (kept for reference)
-├── scripts/                 one-off utilities
+├── scripts/                 download_models.py (used by `avatarvoice download`) and utilities
 ├── mlx_port/                MLX port of the flow transformer + sampler, fast MPS decoder kernels,
 │                            weight converter, equivalence tests, benchmarks (MLX_PERF.md)
 ├── data/                    avatar portrait images (rumi, kelly, ken)
