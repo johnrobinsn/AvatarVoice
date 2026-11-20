@@ -249,10 +249,23 @@ async function loadAvatars(){
 }
 loadAvatars();
 
+function clearChatAndLog(){
+  // Wipe the visible transcript + log panes. Matches server-side LLM.reset()
+  // which runs on both sess.close() and /offer; without this the browser DOM
+  // keeps accumulating messages across sessions.
+  document.getElementById('chat').innerHTML = '';
+  if (typeof logEl !== 'undefined' && logEl) logEl.textContent = '';
+  if (typeof refreshTwistyPreview === 'function') {
+    refreshTwistyPreview('chat');
+    refreshTwistyPreview('log');
+  }
+}
+
 async function start(){
   document.getElementById('start').disabled = true;
   document.getElementById('stop').disabled = false;
   document.getElementById('picker').style.display = 'none';
+  clearChatAndLog();
   // Apply avatar selection + name to the server BEFORE opening the session.
   const name = document.getElementById('avatar-name').value.trim();
   try {
@@ -407,6 +420,7 @@ function stop(){
   document.getElementById('start').disabled = false;
   document.getElementById('stop').disabled = true;
   document.getElementById('picker').style.display = 'flex';
+  clearChatAndLog();
   setState('stopped');
 }
 
