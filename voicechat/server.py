@@ -91,7 +91,9 @@ def _extend_rope_tables(flow_transformer, new_max_len: int = 65536):
     for name, mod in flow_transformer.named_modules():
         if "freqs_cis" in getattr(mod, "_buffers", {}):
             old = mod._buffers["freqs_cis"]
-            head_dim = old.shape[-1] * 2
+            # Post real-valued rewrite: freqs_cis is [end, head_dim]. Previously
+            # it was complex [end, head_dim/2]; handle either for safety.
+            head_dim = old.shape[-1] * 2 if old.is_complex() else old.shape[-1]
             new_table = precompute_freqs_cis(head_dim, new_max_len).to(old.device)
             mod.register_buffer("freqs_cis", new_table, persistent=False)
             replaced += 1
