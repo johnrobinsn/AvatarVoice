@@ -1,3 +1,4 @@
 [submodule "avatarforcing"]
 	path = avatarforcing
 	url = https://github.com/johnrobinsn/AvatarForcing.git
+	ignore = untracked
