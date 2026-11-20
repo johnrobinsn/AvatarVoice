@@ -85,7 +85,7 @@ def extend_rope(ft, new_max=65536):
     for name, mod in ft.named_modules():
         if "freqs_cis" in getattr(mod, "_buffers", {}):
             old = mod._buffers["freqs_cis"]
-            head_dim = old.shape[-1] * 2
+            head_dim = old.shape[-1] * 2 if old.is_complex() else old.shape[-1]
             new_table = precompute_freqs_cis(head_dim, new_max).to(old.device)
             mod.register_buffer("freqs_cis", new_table, persistent=False)
             n += 1

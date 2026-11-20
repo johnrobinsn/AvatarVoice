@@ -54,7 +54,7 @@ from inference import InferenceAgent
 from voicechat.rings import AudioRing, VideoRing, FeatureRing
 from voicechat.face_crop import FaceCropper
 from voicechat.vad import VADWorker, TurnDetectorConfig
-from voicechat.stt import WhisperSTT
+from voicechat.stt import WhisperSTT, ParakeetSTT
 from voicechat.llm import VLLMClient
 from voicechat.tts import PhononTTS, resample_24k_to_48k
 from voicechat.reply_pipeline import reply_pipeline
@@ -91,7 +91,9 @@ def _extend_rope_tables(flow_transformer, new_max_len: int = 65536):
     for name, mod in flow_transformer.named_modules():
         if "freqs_cis" in getattr(mod, "_buffers", {}):
             old = mod._buffers["freqs_cis"]
-            head_dim = old.shape[-1] * 2
+            # Post real-valued rewrite: freqs_cis is [end, head_dim]. Previously
+            # it was complex [end, head_dim/2]; handle either for safety.
+            head_dim = old.shape[-1] * 2 if old.is_complex() else old.shape[-1]
             new_table = precompute_freqs_cis(head_dim, new_max_len).to(old.device)
             mod.register_buffer("freqs_cis", new_table, persistent=False)
             replaced += 1
@@ -102,6 +104,24 @@ def init_singletons(avatar_ref_path: str = None, single_gpu: bool = False):
     global AGENT, STT, LLM, TTS, FACE_CROPPER, AVATAR_REF_TENSOR
     if AGENT is not None:
         return
+
+    # Load Parakeet STT FIRST so onnxruntime-gpu creates its CUDA/cuBLAS
+    # context on a clean device. If torch initializes CUDA first, ORT's
+    # first cuBLAS MatMul fails with "the library was not initialized".
+    # We also warm it with a tiny dummy transcribe so cuBLAS is fully set up
+    # before torch builds its parallel state. Whisper doesn't have this
+    # issue (ctranslate2 uses a different path) so it stays after avatar.
+    stt_backend = os.environ.get("AF_STT", "parakeet").lower()
+    if stt_backend == "parakeet":
+        log.info("loading Parakeet STT (before AvatarForcing to grab cuBLAS first)")
+        STT = ParakeetSTT(device="cuda:0")
+        try:
+            import numpy as _np
+            _warm = _np.zeros(int(0.5 * 16000), dtype=_np.float32)
+            STT._blocking_transcribe(_warm)   # warms cuBLAS
+            log.info("Parakeet STT warmed")
+        except Exception as e:
+            log.exception(f"Parakeet warmup failed: {e}")
 
     log.info("loading AvatarForcing")
     class Opt: pass
@@ -150,8 +170,11 @@ def init_singletons(avatar_ref_path: str = None, single_gpu: bool = False):
     # access race. Re-enable if we switch to a dialog/user-mirroring mode.
     FACE_CROPPER = None
 
-    log.info(f"loading Whisper STT on {aux_device}")
-    STT = WhisperSTT(device=aux_device)
+    # Parakeet was loaded + warmed above (before AvatarForcing). For Whisper,
+    # load it here after AvatarForcing as before.
+    if stt_backend != "parakeet":
+        log.info(f"loading Whisper STT on {aux_device}")
+        STT = WhisperSTT(device=aux_device)
 
     log.info("loading Phonon TTS")
     TTS = PhononTTS()
