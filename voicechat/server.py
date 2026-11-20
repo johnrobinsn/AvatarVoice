@@ -54,7 +54,7 @@ from inference import InferenceAgent
 from voicechat.rings import AudioRing, VideoRing, FeatureRing
 from voicechat.face_crop import FaceCropper
 from voicechat.vad import VADWorker, TurnDetectorConfig
-from voicechat.stt import WhisperSTT
+from voicechat.stt import WhisperSTT, ParakeetSTT
 from voicechat.llm import VLLMClient
 from voicechat.tts import PhononTTS, resample_24k_to_48k
 from voicechat.reply_pipeline import reply_pipeline
@@ -152,8 +152,21 @@ def init_singletons(avatar_ref_path: str = None, single_gpu: bool = False):
     # access race. Re-enable if we switch to a dialog/user-mirroring mode.
     FACE_CROPPER = None
 
-    log.info(f"loading Whisper STT on {aux_device}")
-    STT = WhisperSTT(device=aux_device)
+    # AF_STT: "whisper" (default) or "parakeet".
+    # Parakeet (via onnx-asr) loads in ~2 s vs Whisper's ~15 s and matches
+    # the Mac/MLX backend's STT weights. English-only on the v2 model.
+    #
+    # Parakeet is loaded LAZILY here (after the avatar worker warmup) because
+    # onnxruntime-gpu's CUDA context interferes with torch's AOTI/compile CUDA
+    # graph capture — co-loading them adds ~11 s to avatar warmup. Whisper
+    # uses ctranslate2 which doesn't have the same contention.
+    stt_backend = os.environ.get("AF_STT", "whisper").lower()
+    _load_parakeet_later = False
+    if stt_backend == "parakeet":
+        _load_parakeet_later = True
+    else:
+        log.info(f"loading Whisper STT on {aux_device}")
+        STT = WhisperSTT(device=aux_device)
 
     log.info("loading Phonon TTS")
     TTS = PhononTTS()
@@ -181,6 +194,11 @@ def init_singletons(avatar_ref_path: str = None, single_gpu: bool = False):
     AVATAR_WORKER.start()
     AVATAR_WORKER._warmup_done.wait()   # block until warmup finishes
     log.info("avatar worker ready")
+
+    # Lazy Parakeet load — after avatar warmup to avoid CUDA context contention.
+    if _load_parakeet_later:
+        log.info(f"loading Parakeet STT on {aux_device} (post-warmup)")
+        STT = ParakeetSTT(device=aux_device)
 
     # Pre-preprocess all catalog portraits so /set-avatar is instant.
     _preload_avatar_tensors()

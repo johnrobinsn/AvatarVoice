@@ -11,11 +11,16 @@ Usage:
     stt = WhisperSTT()
     text = await stt.transcribe(audio_f32_16k)
 
-NOTE: we tried swapping to NVIDIA Parakeet-TDT-0.6b-v2 via NeMo for parity
-with macvoice, but NeMo #16325 (open PR #16330 as of 11/2026) crashes the
-CUDA-graph decoder with illegal-memory-access on the second transcribe() call
-after any empty_cache() runs in the process. Reverted. Revisit once that PR
-lands, or try the ONNX Runtime port of Parakeet.
+For parity with the Mac/MLX backend (which runs Parakeet-TDT-0.6b-v2 via
+parakeet-mlx), the CUDA server can opt into the same weights via the
+onnxruntime-based `ParakeetSTT` below. Enable with `AF_STT=parakeet`.
+Parakeet loads in ~2 s (vs Whisper's ~15 s) and emits streaming-friendly
+RNN-T output — it's a startup + latency win.
+
+Historical: an earlier attempt to use NVIDIA Parakeet via NeMo crashed the
+CUDA-graph decoder with an illegal-memory-access on the second transcribe()
+call after any empty_cache() (NeMo issue #16325, open PR #16330). The
+onnx-asr + onnxruntime-gpu path sidesteps that entirely.
 """
 from __future__ import annotations
 
@@ -75,6 +80,48 @@ class WhisperSTT:
         """Audio: f32 PCM mono at 16 kHz."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, self._blocking_transcribe, audio, language)
+
+
+class ParakeetSTT:
+    """Parakeet-TDT-0.6b-v2 via onnx-asr + onnxruntime-gpu.
+
+    Same interface as WhisperSTT (`await stt.transcribe(audio_f32_16k)`).
+    Loads in ~2 s (vs Whisper's ~15 s). Transcription latency on a 2 s
+    clip is ~100-150 ms. Uses the same weights as the Mac/MLX backend.
+
+    Requires: onnx-asr[gpu,hub], and cuDNN 9 on LD_LIBRARY_PATH (the preload
+    block at the top of this module handles that for the project venv).
+    """
+    DEFAULT_MODEL_ID = "nemo-parakeet-tdt-0.6b-v2"
+
+    def __init__(self, model_id: str = DEFAULT_MODEL_ID, device: str = "cuda:0"):
+        import onnx_asr
+        log.info(f"loading {model_id} (onnx-asr) on {device}")
+        t0 = time.perf_counter()
+        # Let onnx-asr pick the provider — it enumerates installed onnxruntime
+        # providers and uses CUDA when onnxruntime-gpu is installed. Passing
+        # providers=[("CUDAExecutionProvider", {"device_id": N}), ...]
+        # explicitly caused onnxruntime 1.32 to reject CUDA and silently fall
+        # back to CPU. Control the GPU with CUDA_VISIBLE_DEVICES instead.
+        self._model = onnx_asr.load_model(model_id)
+        log.info(f"loaded in {time.perf_counter() - t0:.2f}s")
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="af-stt-parakeet")
+
+    def _blocking_transcribe(self, audio: np.ndarray, language: str = "en") -> str:
+        t0 = time.perf_counter()
+        # onnx-asr accepts a float32 waveform at 16 kHz directly; language is
+        # ignored (the TDT v2 model is English-only; v3 is multilingual).
+        text = self._model.recognize(audio, sample_rate=16000).strip()
+        dt = (time.perf_counter() - t0) * 1000
+        log.info(f"stt: {audio.shape[0] / 16000:.2f}s audio -> {dt:.1f}ms  text={text!r}")
+        return text
+
+    async def transcribe(self, audio: np.ndarray, language: str = "en") -> str:
+        """Audio: f32 PCM mono at 16 kHz."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor, self._blocking_transcribe, audio, language)
 
 
 if __name__ == "__main__":
