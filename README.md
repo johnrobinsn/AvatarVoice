@@ -111,9 +111,12 @@ keeps a log in `~/.avatarvoice/install.log`; re-running it resumes or updates. O
 connection it takes a few minutes. Options: `AVATARVOICE_HOME` (install location), `AVATARVOICE_REF`
 (branch or tag).
 
-The sections below set things up by hand instead.
+Prefer to read it first? `curl -LsSf https://raw.githubusercontent.com/johnrobinsn/AvatarVoice/main/install.sh -o install.sh`,
+look it over, then `bash install.sh`. It runs the same steps as the manual install below.
 
-## Running
+## Manual install
+
+The same steps the installer runs. Needs [uv](https://docs.astral.sh/uv/) and git.
 
 ### 1. Clone with submodule
 
@@ -122,94 +125,89 @@ git clone --recurse-submodules https://github.com/johnrobinsn/AvatarVoice.git
 cd AvatarVoice
 ```
 
-### 2. Environment + weights
-
-<details open><summary><b>Linux + NVIDIA</b></summary>
-
-Follow upstream setup to install torch and download the AvatarForcing weights:
+### 2. Python environment
 
 ```bash
-cd avatarforcing
-bash environment.sh              # creates conda env + installs requirements
-bash download_weights.sh         # downloads pretrained_dir/
-cd ..
+uv sync
 ```
 
-Install the extra voice-chat dependencies into the same env:
+`pyproject.toml` / `uv.lock` define both platforms: on **macOS** (Python 3.12) the MLX avatar stack
+and Parakeet STT; on **Linux** (Python 3.11) PyTorch for CUDA 12.8 (needed for Blackwell GPUs) and
+faster-whisper. The venv is `.venv`.
+
+### 3. Models
 
 ```bash
-pip install -r requirements-voicechat.txt
+uv run avatarvoice download
 ```
-</details>
 
-<details open><summary><b>macOS + Apple Silicon</b></summary>
+AvatarForcing checkpoints (the authors' Google Drive, as in `avatarforcing/download_weights.sh`),
+wav2vec2, the STT model and the LLM weights; on macOS also the MLX conversion of the flow
+transformer. Skips anything already present; `--check` lists what's missing.
 
-Python 3.12 via [uv](https://docs.astral.sh/uv/):
+### 4. LLM server environment
+
+The LLM server gets its own venv (it needs newer packages than the avatar):
 
 ```bash
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -r mlx_port/requirements-mac.txt
-# AvatarForcing's wav2vec2 wrapper needs transformers 4.30.2; its tokenizers pin has no
-# Python 3.12 wheels and isn't needed, hence --no-deps
-uv pip install --python .venv/bin/python --no-deps transformers==4.30.2
-
-# weights (the same files as download_weights.sh), then the MLX conversion
-cd avatarforcing
-../.venv/bin/gdown 1a0ZqX9GMrkb3JFQgOBmUB0V-Bpwtv4Hp -O pretrained_dir/
-../.venv/bin/gdown 1lchvHiDka0bBQ29bdY6lHxCyNGbGzvS_ -O pretrained_dir/
-../.venv/bin/hf download facebook/wav2vec2-base-960h --local-dir pretrained_dir/wav2vec2-base-960h
-cd ..
-.venv/bin/python mlx_port/convert_weights.py \
-    --src avatarforcing/pretrained_dir/flow_transformer.pth \
-    --dst avatarforcing/pretrained_dir/flow_transformer_mlx.safetensors
+# Linux + NVIDIA
+uv venv --python 3.12 .venv-llm && uv pip install --python .venv-llm/bin/python vllm
+# macOS + Apple Silicon
+uv venv --python 3.12 .venv-llm && uv pip install --python .venv-llm/bin/python mlx-lm
 ```
-</details>
 
-### 3. Start a local LLM server
-
-<details open><summary><b>Linux + NVIDIA</b></summary>
-
-For a single-GPU setup where vLLM shares the card with the avatar, keep vLLM's KV reservation modest:
+### 5. Run
 
 ```bash
-vllm serve cyankiwi/Qwen3-4B-Instruct-2507-AWQ-4bit \
+uv run avatarvoice run          # starts the LLM + voice servers, opens the browser; Ctrl-C stops both
+```
+
+Open `http://<host>:8082` in a browser, pick an avatar, click **Start session**, and talk. On a laptop, use headphones: the avatar's voice from the speakers can otherwise be heard as you talking over it.
+
+### Running the servers yourself
+
+`avatarvoice run` wraps these; run them directly for custom setups.
+
+<details><summary><b>LLM server</b></summary>
+
+Linux + NVIDIA — for a single-GPU setup where vLLM shares the card with the avatar, keep vLLM's KV reservation modest:
+
+```bash
+.venv-llm/bin/vllm serve cyankiwi/Qwen3-4B-Instruct-2507-AWQ-4bit \
     --port 8000 \
     --max-model-len 4096 \
     --gpu-memory-utilization 0.15
 ```
 
 If vLLM gets its own GPU, you can drop the `--gpu-memory-utilization` flag.
-</details>
 
-<details open><summary><b>macOS + Apple Silicon</b></summary>
-
-In its own venv (mlx-lm needs a newer transformers than the avatar):
+macOS + Apple Silicon:
 
 ```bash
-uv venv --python 3.12 .venv-llm && uv pip install --python .venv-llm/bin/python mlx-lm
 .venv-llm/bin/mlx_lm.server --model mlx-community/Qwen3-4B-Instruct-2507-4bit \
     --port 8000 --prompt-cache-size 1
 ```
+
+Any OpenAI-compatible server works; point AvatarVoice at it with `AF_LLM_MODEL` / `AF_LLM_BASE_URL`.
 </details>
 
-### 4. Start AvatarVoice
+<details><summary><b>AvatarVoice server</b></summary>
 
 **Linux, single-GPU (default — avatar + aux share cuda:0):**
 ```bash
-python voicechat/server.py --port 8082
+uv run python voicechat/server.py --port 8082
 ```
 
 **Linux, dual-GPU (opt-in — avatar on cuda:1, aux on cuda:0):**
 ```bash
-python voicechat/server.py --port 8082 --dual-gpu
+uv run python voicechat/server.py --port 8082 --dual-gpu
 ```
 
 **macOS** (the backend is picked automatically; `AF_BACKEND=mlx`):
 ```bash
-.venv/bin/python voicechat/server.py --port 8082
+uv run python voicechat/server.py --port 8082
 ```
-
-Open `http://<host>:8082` in a browser, pick an avatar, click **Start session**, and talk. On a laptop, use headphones: the avatar's voice from the speakers can otherwise be heard as you talking over it.
+</details>
 
 ### Testing without a browser
 

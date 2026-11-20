@@ -132,23 +132,11 @@ note "$(cd "$APP" && git log -1 --format='%h %s' | cut -c1-70)"
 # ---------------- 4. Python environment ----------------
 step "Python environment (Python $PY, ~2–5 GB, a few minutes the first time)"
 cd "$APP"
-[ -x .venv/bin/python ] || run_step "Creating environment" "" uv venv --quiet --python "$PY" .venv \
-  || die "Couldn't create a Python $PY environment."
-if [ "$PLATFORM" = mac ]; then
-  run_step "Installing PyTorch, MLX and voice-chat packages" "$UV_CACHE" \
-    uv pip install --python .venv/bin/python -r mlx_port/requirements-mac.txt \
-    || die "Package install failed."
-  # AvatarForcing's wav2vec2 wrapper needs transformers 4.30.2, whose tokenizers pin has no
-  # Python 3.12 wheels; wav2vec2 doesn't use a tokenizer, so install it without deps.
-  run_step "Installing transformers 4.30.2" "$UV_CACHE" \
-    uv pip install --python .venv/bin/python --no-deps transformers==4.30.2 || die "Package install failed."
-else
-  run_step "Installing PyTorch (CUDA 12.8)" "$UV_CACHE" \
-    uv pip install --python .venv/bin/python torch torchvision --index-url https://download.pytorch.org/whl/cu128 \
-    || die "PyTorch install failed." "Check the NVIDIA driver supports CUDA 12.8 (nvidia-smi shows the max CUDA version)."
-  run_step "Installing voice-chat packages" "$UV_CACHE" \
-    uv pip install --python .venv/bin/python -r requirements-cuda.txt || die "Package install failed."
-fi
+# pyproject.toml + uv.lock define both platforms' environments (platform markers), so
+# this is the same `uv sync` the manual instructions use.
+HINT="Re-run to retry; the log above has details."
+[ "$PLATFORM" = cuda ] && HINT="Check the NVIDIA driver supports CUDA 12.8 (nvidia-smi shows the max CUDA version), then re-run."
+run_step "Installing packages (uv sync)" "$UV_CACHE" uv sync --frozen --python "$PY" || die "Package install failed." "$HINT"
 run_step "Checking the environment" "" .venv/bin/python -c "import torch, aiortc, voicechat.rings" \
   || die "The environment doesn't import cleanly."
 
@@ -175,7 +163,7 @@ mkdir -p "$BIN"
 cat >"$BIN/avatarvoice" <<EOF
 #!/usr/bin/env bash
 # AvatarVoice launcher (installed by install.sh)
-exec "$APP/.venv/bin/python" "$APP/voicechat/launcher.py" "\$@"
+exec "$APP/.venv/bin/avatarvoice" "\$@"
 EOF
 chmod +x "$BIN/avatarvoice"
 ok "$BIN/avatarvoice"

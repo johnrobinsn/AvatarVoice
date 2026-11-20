@@ -24,25 +24,14 @@ the default on macOS) — see the top-level README, "Running on Apple Silicon".
 | `bench.py` | Flow-transformer per-block timing |
 | `bench_decoder.py` | Motion-decoder timing + exactness of the fast kernels |
 | `run_stream.py` | End-to-end run on real audio → mp4, timing, optional SSIM vs reference |
-| `requirements-mac.txt` | Tested Mac environment |
 
 ## Setup
 
+From the repo root (the environment is defined in `pyproject.toml` / `uv.lock`):
+
 ```bash
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -r mlx_port/requirements-mac.txt
-uv pip install --python .venv/bin/python --no-deps transformers==4.30.2
-
-# weights (avatarforcing/download_weights.sh, using the venv)
-cd avatarforcing
-../.venv/bin/gdown 1a0ZqX9GMrkb3JFQgOBmUB0V-Bpwtv4Hp -O pretrained_dir/
-../.venv/bin/gdown 1lchvHiDka0bBQ29bdY6lHxCyNGbGzvS_ -O pretrained_dir/
-../.venv/bin/hf download facebook/wav2vec2-base-960h --local-dir pretrained_dir/wav2vec2-base-960h
-cd ..
-
-.venv/bin/python mlx_port/convert_weights.py \
-    --src avatarforcing/pretrained_dir/flow_transformer.pth \
-    --dst avatarforcing/pretrained_dir/flow_transformer_mlx.safetensors
+uv sync                          # macOS: Python 3.12 + MLX + torch MPS stack
+uv run avatarvoice download      # weights, incl. the MLX conversion (convert_weights.py)
 ```
 
 ## Use

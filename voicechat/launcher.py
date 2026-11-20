@@ -163,7 +163,8 @@ def wait_ready(proc, url, label, log: Path, timeout, hint=""):
 # ---------------- commands ----------------
 
 def cmd_download(args):
-    r = subprocess.run([sys.executable, str(ROOT / "scripts" / "download_models.py")], cwd=ROOT)
+    r = subprocess.run([sys.executable, str(ROOT / "scripts" / "download_models.py")] + (["--check"] if args.check else []),
+                       cwd=ROOT)
     sys.exit(r.returncode)
 
 
@@ -292,7 +293,8 @@ def main(argv=None):
     r = sub.add_parser("run", help="start the LLM + voice servers and open the browser")
     r.add_argument("--no-browser", action="store_true")
     r.add_argument("--llm-gpu-fraction", type=float, default=0.15, help="(Linux) vLLM --gpu-memory-utilization")
-    sub.add_parser("download", help="download / verify models")
+    d = sub.add_parser("download", help="download / verify models")
+    d.add_argument("--check", action="store_true", help="only list what's missing")
     sub.add_parser("status", help="show what's running")
     sub.add_parser("stop", help="stop servers started by `avatarvoice run`")
     lg = sub.add_parser("logs", help="show recent log lines")
