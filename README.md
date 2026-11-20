@@ -133,7 +133,7 @@ Open `http://<host>:8082` in a browser, pick an avatar, click **Start session**,
 | Var | Default | Notes |
 |---|---|---|
 | `AF_STT` | `parakeet` | STT backend. `parakeet` = Parakeet-TDT-0.6b-v2 via onnx-asr. `whisper` = faster-whisper distil-large-v3. |
-| `AF_AOTI` | `1` | `1` = load prebuilt AOTInductor artifacts from `compiled_models/` when present (see `scripts/compile_aot.py` and `scripts/compile_mae_aot.py`). `0` = always use `torch.compile`. |
+| `AF_AOTI` | `1` | **Experimental.** `1` = load prebuilt AOTInductor artifacts from `compiled_models/` when present (see `scripts/compile_aot.py` and `scripts/compile_mae_aot.py`). Startup drops from ~82 s to ~42 s, but current builds produce visibly degraded avatar frames — set `AF_AOTI=0` if you built a `.pt2` and see rendering issues. Default behavior (no `.pt2` in `compiled_models/`) is unaffected. |
 | `AF_COMPILE_MODE` | `reduce-overhead` | torch.compile mode for the flow transformer. Set `default` to drop CUDA graphs. |
 | `AF_MAE_COMPILE_MODE` | `default` | torch.compile mode for the MAE decoder. Set `reduce-overhead` for +~5% speed at the cost of ~6 GB persistent VRAM. |
 | `AF_SINGLE_GPU` | (unset) | `1` forces single-GPU; `0` forces dual-GPU. Overrides CLI flag if set. |

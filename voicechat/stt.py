@@ -34,16 +34,39 @@ from pathlib import Path
 
 import numpy as np
 
-# Preload CUDA 12 cuBLAS + cuDNN via ctypes so ctranslate2's dlopen finds them
-# in-process (setting os.environ['LD_LIBRARY_PATH'] here is a no-op — ld.so
-# only reads the env at process start).
 _ROOT = Path(__file__).resolve().parent.parent
 _venv = _ROOT / ".venv/lib/python3.11/site-packages"
 import ctypes
-for _p in [_venv / "nvidia/cublas/lib/libcublas.so.12",
-           _venv / "nvidia/cudnn/lib/libcudnn.so.9"]:
-    if _p.exists():
-        ctypes.CDLL(str(_p), mode=ctypes.RTLD_GLOBAL)
+
+
+def _preload_whisper_cuda_libs():
+    """Preload the venv's CUDA 12 cuBLAS + cuDNN via ctypes so ctranslate2's
+    dlopen finds them in-process (setting os.environ['LD_LIBRARY_PATH'] here
+    is a no-op — ld.so only reads the env at process start). Called from
+    WhisperSTT.__init__ rather than module-load time so the cuBLAS 12 symbol
+    isn't force-loaded for every process — onnxruntime-gpu (ParakeetSTT)
+    also needs libcublas.so.12 but sets up its init differently."""
+    for _p in [_venv / "nvidia/cublas/lib/libcublas.so.12",
+               _venv / "nvidia/cudnn/lib/libcudnn.so.9"]:
+        if _p.exists():
+            ctypes.CDLL(str(_p), mode=ctypes.RTLD_GLOBAL)
+
+
+def _preload_parakeet_cuda_libs():
+    """Preload the venv's CUDA 12 cuBLAS, cuBLAS-Lt, and cuDNN 9 via ctypes
+    so onnxruntime-gpu's dlopen finds them in-process. Without this, the
+    first MatMul inside the Parakeet preprocessor session fails with
+    `CUBLAS failure 1: the library was not initialized` because
+    onnxruntime 1.32 was built against CUDA 12 cuBLAS but torch 2.11 ships
+    CUDA 13 cuBLAS as its default — the dynamic loader resolves to the
+    wrong version. Preloading the venv's cuBLAS-12 (torch-installed as a
+    dependency) via RTLD_GLOBAL puts its symbols in the global namespace
+    before ORT dlopen-s its CUDA execution provider library."""
+    for _p in [_venv / "nvidia/cublas/lib/libcublasLt.so.12",
+               _venv / "nvidia/cublas/lib/libcublas.so.12",
+               _venv / "nvidia/cudnn/lib/libcudnn.so.9"]:
+        if _p.exists():
+            ctypes.CDLL(str(_p), mode=ctypes.RTLD_GLOBAL)
 
 log = logging.getLogger("af-stt")
 
@@ -51,6 +74,7 @@ log = logging.getLogger("af-stt")
 class WhisperSTT:
     def __init__(self, model_id: str = "distil-large-v3", device: str = "cuda:0",
                  compute_type: str = "int8_float16"):
+        _preload_whisper_cuda_libs()
         from faster_whisper import WhisperModel
         log.info(f"loading {model_id} on {device}/{compute_type}")
         t0 = time.perf_counter()
@@ -89,12 +113,14 @@ class ParakeetSTT:
     Loads in ~2 s (vs Whisper's ~15 s). Transcription latency on a 2 s
     clip is ~100-150 ms. Uses the same weights as the Mac/MLX backend.
 
-    Requires: onnx-asr[gpu,hub], and cuDNN 9 on LD_LIBRARY_PATH (the preload
-    block at the top of this module handles that for the project venv).
+    Requires: onnx-asr[gpu,hub]. Required CUDA libraries (cuBLAS 12 +
+    cuDNN 9) are preloaded from the project venv at init time — no
+    LD_LIBRARY_PATH gymnastics needed by the user.
     """
     DEFAULT_MODEL_ID = "nemo-parakeet-tdt-0.6b-v2"
 
     def __init__(self, model_id: str = DEFAULT_MODEL_ID, device: str = "cuda:0"):
+        _preload_parakeet_cuda_libs()
         import onnx_asr
         log.info(f"loading {model_id} (onnx-asr) on {device}")
         t0 = time.perf_counter()
