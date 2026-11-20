@@ -245,7 +245,13 @@ class VideoRing:
         self.fps = fps
         self.H, self.W, self.C = height, width, channels
         self.capacity = int(capacity_seconds * fps)
-        self._buf = np.zeros((self.capacity, self.H, self.W, self.C), dtype=np.uint8)
+        # Allocated on first write: 30 s at 512x512 is ~590 MB, and the voice
+        # chat never writes this ring (webcam frames aren't consumed). Eager
+        # np.zeros of it every session is wasted; on macOS it also grew the
+        # process footprint by ~one ring per session (the allocator zero-fills
+        # reused pages, making them resident). Linux/glibc mmaps buffers this
+        # large fresh, so there it only cost address space.
+        self._buf: Optional[np.ndarray] = None
         self._times = np.zeros(self.capacity, dtype=np.float64)
         self._write_pos = 0
         self._count = 0  # number of valid frames in buffer (<= capacity)
@@ -257,6 +263,8 @@ class VideoRing:
             f"frame shape {frame.shape} != expected {(self.H, self.W, self.C)}"
         assert frame.dtype == np.uint8
         with self._lock:
+            if self._buf is None:
+                self._buf = np.zeros((self.capacity, self.H, self.W, self.C), dtype=np.uint8)
             self._buf[self._write_pos] = frame
             self._times[self._write_pos] = ts
             self._write_pos = (self._write_pos + 1) % self.capacity
