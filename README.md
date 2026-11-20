@@ -7,7 +7,7 @@ Runs on two platforms from the same code:
 - **Linux + NVIDIA** — works well on a single NVIDIA Blackwell GPU with 32 GB+ VRAM (hosts the full avatar pipeline + a 4B LLM alongside). Default configuration is single-GPU; a `--dual-gpu` opt-in splits the avatar onto a second card for extra headroom.
 - **macOS + Apple Silicon** — runs on a 32 GB M-series MacBook (tested on an M5): the AvatarForcing flow transformer in [MLX](https://github.com/ml-explore/mlx), everything else on the Mac GPU, ~2× realtime.
 
-Wraps [AvatarForcing](https://github.com/TaekyungKi/AvatarForcing) (Ki et al., CVPR 2026) in a voice-chat loop (Silero VAD + Smart Turn + STT + LLM + Phonon TTS + wav2vec batching), plus the streaming infrastructure needed to keep the model generating indefinitely on a single GPU.
+Wraps [AvatarForcing](https://github.com/TaekyungKi/AvatarForcing) (Ki et al., CVPR 2026) in a voice-chat loop (Silero VAD + Smart Turn + Parakeet STT + LLM + Phonon TTS + wav2vec batching), plus the streaming infrastructure needed to keep the model generating indefinitely on a single GPU.
 
 [Blog Article: https://www.storminthecastle.com/posts/avatar-voice/](https://www.storminthecastle.com/posts/avatar-voice/)
 
@@ -37,7 +37,7 @@ The pipeline, rings, VAD/turn detection, TTS and WebRTC are shared; the backend 
 | | Linux + NVIDIA (`torch`) | macOS + Apple Silicon (`mlx`) |
 |---|---|---|
 | Avatar (AvatarForcing) | PyTorch CUDA, `torch.compile` + CUDA graphs | flow transformer in MLX ([`mlx_port/`](mlx_port/)); motion decoder + wav2vec2 on PyTorch MPS |
-| STT | faster-whisper (distil-large-v3) | Parakeet TDT 0.6B v2 on MLX (as in [macvoice](https://github.com/johnrobinsn/macvoice)) |
+| STT | Parakeet TDT 0.6B v2 via onnx-asr (`AF_STT=whisper`: faster-whisper) | Parakeet TDT 0.6B v2 on MLX (as in [macvoice](https://github.com/johnrobinsn/macvoice)) |
 | LLM | vLLM | `mlx_lm.server` (any OpenAI-compatible server works for either) |
 | TTS · VAD · turn detection | Phonon · Silero · Smart Turn | same |
 
@@ -136,7 +136,7 @@ uv sync
 
 `pyproject.toml` / `uv.lock` define both platforms: on **macOS** (Python 3.12) the MLX avatar stack
 and Parakeet STT; on **Linux** (Python 3.11) PyTorch for CUDA 12.8 (needed for Blackwell GPUs) and
-faster-whisper. The venv is `.venv`.
+Parakeet STT via onnx-asr / onnxruntime-gpu (faster-whisper as a fallback). The venv is `.venv`.
 
 ### 3. Models
 
@@ -226,6 +226,8 @@ uv run python voicechat/server.py --port 8082
 | `AF_BACKEND` | `mlx` on macOS, else `torch` | both | Inference backend. |
 | `AF_PORT` | `8082` | both | Server port. |
 | `AF_LLM_MODEL` | `cyankiwi/Qwen3-4B-Instruct-2507-AWQ-4bit` / `mlx-community/Qwen3-4B-Instruct-2507-4bit` | both | LLM model name sent to the OpenAI-compatible server. |
+| `AF_STT` | `parakeet` | torch | STT backend on Linux. `parakeet` = Parakeet-TDT-0.6b-v2 via onnx-asr (onnxruntime-gpu); `whisper` = faster-whisper distil-large-v3. (macOS always uses Parakeet on MLX.) |
+| `AF_AOTI` | `1` | torch | **Experimental.** `1` = load prebuilt AOTInductor artifacts from `compiled_models/` when present (see `scripts/compile_aot.py` and `scripts/compile_mae_aot.py`). Startup drops from ~82 s to ~42 s, but current builds produce visibly degraded avatar frames — set `AF_AOTI=0` if you built a `.pt2` and see rendering issues. Default behavior (no `.pt2` in `compiled_models/`) is unaffected. |
 | `AF_COMPILE_MODE` | `reduce-overhead` | torch | torch.compile mode for the flow transformer. Set `default` to drop CUDA graphs. |
 | `AF_MAE_COMPILE_MODE` | `default` | torch | torch.compile mode for the MAE decoder. Set `reduce-overhead` for +~5% speed at the cost of ~6 GB persistent VRAM. |
 | `AF_SINGLE_GPU` | (unset) | torch | `1` forces single-GPU; `0` forces dual-GPU. Overrides CLI flag if set. |

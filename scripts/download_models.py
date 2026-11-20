@@ -30,7 +30,7 @@ DRIVE_FOLDER = "https://drive.google.com/drive/folders/1rN52J2QXD8A-r2CZ8nDqFdwv
 LLM_MAC = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 LLM_CUDA = "cyankiwi/Qwen3-4B-Instruct-2507-AWQ-4bit"
 PARAKEET = ("johnrobinsn/parakeet-tdt-0.6b-v2-mlx-q8", "aad991e02731e67298700cf1f2b86ddaa45dd18c")
-WHISPER = "Systran/faster-distil-whisper-large-v3"
+PARAKEET_ONNX = ("nemo-parakeet-tdt-0.6b-v2", "istupakov/parakeet-tdt-0.6b-v2-onnx")   # onnx-asr id, HF repo
 
 BOLD, DIM, GREEN, YELLOW, RED, RESET = (("\033[1m", "\033[2m", "\033[32m", "\033[33m", "\033[31m", "\033[0m")
                                         if sys.stdout.isatty() else ("",) * 6)
@@ -112,8 +112,9 @@ def items() -> list[Item]:
         ]
     else:
         out += [
-            Item("distil-whisper large-v3 speech-to-text (1.5 GB)",
-                 lambda: hf_present(WHISPER), lambda: hf_fetch(WHISPER)),
+            Item("Parakeet speech-to-text, ONNX (onnx-asr)",
+                 lambda: hf_present(PARAKEET_ONNX[1]), _parakeet_onnx,
+                 note="(AF_STT=whisper downloads faster-whisper's model on first use instead)"),
             Item(f"LLM {LLM_CUDA} (2.7 GB)",
                  lambda: hf_present(LLM_CUDA), lambda: hf_fetch(LLM_CUDA)),
         ]
@@ -123,6 +124,12 @@ def items() -> list[Item]:
         Item("face detector (face-alignment, ~100 MB)", _face_alignment_present, _face_alignment),
     ]
     return out
+
+
+def _parakeet_onnx():
+    """Fetch exactly the files onnx-asr loads, via onnx-asr itself (CPU provider: no CUDA init)."""
+    import onnx_asr
+    onnx_asr.load_model(PARAKEET_ONNX[0], providers=["CPUExecutionProvider"])
 
 
 def _phonon():

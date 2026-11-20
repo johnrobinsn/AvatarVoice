@@ -34,12 +34,16 @@ dependencies = [
     "aiohttp",
     "httpx",
     "scipy",
-    "onnxruntime",
+    # Silero VAD / Smart Turn use ONNX Runtime on the CPU. Linux gets the GPU build (which
+    # includes the CPU provider) for Parakeet; see override-dependencies.
+    "onnxruntime; sys_platform == 'darwin'",
+    "onnxruntime-gpu; sys_platform == 'linux'",
     "silero-vad",
     "ptts>=0.7",
     "face-alignment",
     "openai",
-    # Linux + NVIDIA: faster-whisper STT
+    # Linux + NVIDIA: Parakeet STT via onnx-asr (default, AF_STT=parakeet); faster-whisper fallback
+    "onnx-asr[hub]; sys_platform == 'linux'",
     "faster-whisper; sys_platform == 'linux'",
     # macOS + Apple Silicon: MLX flow transformer, Parakeet STT
     "mlx>=0.32; sys_platform == 'darwin' and platform_machine == 'arm64'",
@@ -59,7 +63,14 @@ environments = [
 # transformers 4.30.2 needs tokenizers<0.14, which has no Python 3.12 wheels. Linux keeps it
 # (faster-whisper uses it); on macOS nothing needs it (wav2vec2 has no tokenizer, Parakeet
 # brings its own), so it's dropped there.
-override-dependencies = ["tokenizers>=0.13.3,<0.14; sys_platform == 'linux'"]
+#
+# onnxruntime and onnxruntime-gpu install into the same `onnxruntime` package and clobber
+# each other; faster-whisper and silero-vad depend on the CPU one. Keep it on macOS only, so
+# Linux has just onnxruntime-gpu.
+override-dependencies = [
+    "tokenizers>=0.13.3,<0.14; sys_platform == 'linux'",
+    "onnxruntime; sys_platform == 'darwin'",
+]
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]

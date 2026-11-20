@@ -134,7 +134,9 @@ async def main():
     vad = VADWorker(audio_ring=session.user_audio_ring,
                     smart_turn_onnx_path=str(ROOT / "voicechat/models/smart-turn-v3.2-cpu.onnx"),
                     on_start_of_speech=on_sos, on_turn_complete=on_done,
-                    config=TurnDetectorConfig())
+                    # the synthetic mic voice is quieter than a close mic with AGC; use a
+                    # lower energy gate than the server default (see test_webrtc_client.py)
+                    config=TurnDetectorConfig(rms_gate=0.02))
     vad_task = asyncio.create_task(vad.run())
 
     mic = speak_question(question)

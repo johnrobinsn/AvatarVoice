@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import fractions
+import json
 import sys
 import time
 from pathlib import Path
@@ -99,11 +100,19 @@ def speak(question: str) -> tuple[np.ndarray, float]:
     return np.concatenate([np.zeros(48000 * 4, np.float32), q48]), 4.0 + len(q48) / 48000
 
 
-async def session(url: str, mic: np.ndarray, seconds: float) -> dict:
+async def session(url: str, mic: np.ndarray, seconds: float, rms_gate: float | None = None) -> dict:
     pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
     chat = []
     ch = pc.createDataChannel("chat", ordered=True)
     ch.on("message", lambda m: chat.append((time.perf_counter(), m)))
+
+    @ch.on("open")
+    def on_open():
+        # Like the browser, send the VAD settings at session start. The synthetic test
+        # voice is quieter than a close mic with AGC (its loudest 32 ms chunks are ~0.14
+        # RMS), so it needs a lower energy gate than the server default.
+        if rms_gate is not None:
+            ch.send(json.dumps({"type": "config", "key": "rms", "value": rms_gate}))
     pc.addTrack(PCMTrack(mic))
     pc.addTrack(BlankVideoTrack())
     video, audio, stop, tasks = [], [], asyncio.Event(), []
@@ -186,11 +195,15 @@ async def main():
     ap.add_argument("--question", default=QUESTION)
     ap.add_argument("--sessions", type=int, default=1, help="run N back-to-back sessions")
     ap.add_argument("--gap", type=float, default=3.0, help="seconds between sessions")
+    ap.add_argument("--rms-gate", type=float, default=0.02,
+                    help="VAD energy gate sent at session start, like the browser's gear panel "
+                         "(the synthetic voice needs < ~0.1); negative = use the server default")
     args = ap.parse_args()
     mic, q_end = speak(args.question)
+    gate = args.rms_gate if args.rms_gate >= 0 else None
 
     if args.sessions == 1:
-        s = await session(args.url, mic, args.seconds)
+        s = await session(args.url, mic, args.seconds, gate)
         report(s, q_end)
         write_mp4(ROOT / "results" / "webrtc_client.mp4", s)
         sys.exit(0 if s["replies"] else 1)
@@ -198,7 +211,7 @@ async def main():
     seconds = min(args.seconds, q_end + 8.0)       # enough for the reply to start
     failed = []
     for n in range(1, args.sessions + 1):
-        s = await session(args.url, mic, seconds)
+        s = await session(args.url, mic, seconds, gate)
         ok = bool(s["replies"]) and len(s["video"]) > 0
         if not ok:
             failed.append(n)

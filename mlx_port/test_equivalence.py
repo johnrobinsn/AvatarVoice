@@ -179,8 +179,11 @@ def test_helpers():
     print("helpers")
     ref = tft.precompute_freqs_cis(128, 2048)
     out = hm.precompute_freqs_cis(128, 2048)
-    check("precompute_freqs_cis real", ref.real, mx.real(out), 1e-3)
-    check("precompute_freqs_cis imag", ref.imag, mx.imag(out), 1e-3)
+    # The reference table is complex [end, dim/2] (upstream) or, in the AvatarVoice fork
+    # (real-valued RoPE rewrite for AOTInductor), real [end, dim] = cos || sin.
+    ref_cos, ref_sin = (ref.real, ref.imag) if ref.is_complex() else (ref[:, :64], ref[:, 64:])
+    check("precompute_freqs_cis cos", ref_cos, mx.real(out), 1e-3)
+    check("precompute_freqs_cis sin", ref_sin, mx.imag(out), 1e-3)
 
     x = rng(1).standard_normal((2, 8, 12, 128)).astype(np.float32)
     for start in (0, 38, 1100):
