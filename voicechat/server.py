@@ -717,10 +717,11 @@ async def memory_stats(request):
     return web.json_response(out)
 
 
+# Portrait sources: data/CREDITS.md. "gender" picks the TTS voice and the persona prompt.
 AVATAR_CATALOG = [
-    {"id": "rumi",  "file": "rumi.jpg",       "name": "Rumi",  "gender": "female"},
-    {"id": "kelly", "file": "kelly.jpg",      "name": "Kelly", "gender": "female"},
-    {"id": "ken",  "file": "ken.jpg", "name": "Ken",  "gender": "male"},
+    {"id": "rumi",  "file": "rumi.jpg",  "name": "Rumi",  "gender": "female"},
+    {"id": "vicky", "file": "vicky.jpg", "name": "Vicky", "gender": "female"},
+    {"id": "ken",   "file": "ken.jpg",   "name": "Ken",   "gender": "male"},
 ]
 # Currently selected (updated by /set-avatar).
 CURRENT_AVATAR = {"id": "rumi", "file": "rumi.jpg", "name": "Rumi", "gender": "female"}

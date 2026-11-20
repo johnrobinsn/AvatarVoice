@@ -94,7 +94,7 @@ AvatarVoice/
 ├── scripts/                 download_models.py (used by `avatarvoice download`) and utilities
 ├── mlx_port/                MLX port of the flow transformer + sampler, fast MPS decoder kernels,
 │                            weight converter, equivalence tests, benchmarks (MLX_PERF.md)
-├── data/                    avatar portrait images (rumi, kelly, ken)
+├── data/                    avatar portraits (rumi, vicky, ken); sources in data/CREDITS.md
 └── avatarforcing/           submodule → johnrobinsn/AvatarForcing (fork of TaekyungKi's)
 ```
 
