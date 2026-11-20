@@ -11,3 +11,4 @@ logs/
 # Per-machine AOTInductor build artifacts (rebuild locally with scripts/compile_aot.py)
 compiled_models/
 *.pt2
+.run/
