@@ -108,9 +108,7 @@ async def session(url: str, mic: np.ndarray, seconds: float, rms_gate: float | N
 
     @ch.on("open")
     def on_open():
-        # Like the browser, send the VAD settings at session start. The synthetic test
-        # voice is quieter than a close mic with AGC (its loudest 32 ms chunks are ~0.14
-        # RMS), so it needs a lower energy gate than the server default.
+        # Like the browser's gear panel, optionally send a VAD energy gate at session start.
         if rms_gate is not None:
             ch.send(json.dumps({"type": "config", "key": "rms", "value": rms_gate}))
     pc.addTrack(PCMTrack(mic))
@@ -195,9 +193,9 @@ async def main():
     ap.add_argument("--question", default=QUESTION)
     ap.add_argument("--sessions", type=int, default=1, help="run N back-to-back sessions")
     ap.add_argument("--gap", type=float, default=3.0, help="seconds between sessions")
-    ap.add_argument("--rms-gate", type=float, default=0.02,
-                    help="VAD energy gate sent at session start, like the browser's gear panel "
-                         "(the synthetic voice needs < ~0.1); negative = use the server default")
+    ap.add_argument("--rms-gate", type=float, default=-1.0,
+                    help="VAD energy gate to send at session start, like the browser's gear panel "
+                         "(default: don't send; use the server default)")
     args = ap.parse_args()
     mic, q_end = speak(args.question)
     gate = args.rms_gate if args.rms_gate >= 0 else None
