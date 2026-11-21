@@ -6,8 +6,9 @@ Real-time voice chat with a lip-synced diffusion head-avatar. Browser speaks to 
 
 Runs on two platforms from the same code:
 
-- **Linux + NVIDIA** — works well on a single NVIDIA Blackwell GPU with 32 GB+ VRAM (hosts the full avatar pipeline + a 4B LLM alongside). Default configuration is single-GPU; a `--dual-gpu` opt-in splits the avatar onto a second card for extra headroom.
 - **macOS + Apple Silicon** — runs on a 32 GB M-series MacBook (tested on an M5): the AvatarForcing flow transformer in [MLX](https://github.com/ml-explore/mlx), everything else on the Mac GPU, ~2× realtime.
+  
+- **Linux + NVIDIA** — works well on a single NVIDIA Blackwell GPU with 32 GB+ VRAM (hosts the full avatar pipeline + a 4B LLM alongside). Default configuration is single-GPU; a `--dual-gpu` opt-in splits the avatar onto a second card for extra headroom.
 
 Wraps [AvatarForcing](https://github.com/TaekyungKi/AvatarForcing) (Ki et al., CVPR 2026) in a voice-chat loop (Silero VAD + Smart Turn + Parakeet STT + LLM + Phonon TTS + wav2vec batching), plus the streaming infrastructure needed to keep the model generating indefinitely on a single GPU.
 
