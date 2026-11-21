@@ -2,6 +2,8 @@
 
 Real-time voice chat with a lip-synced diffusion head-avatar. Browser speaks to it; the avatar speaks and lip-syncs back, over WebRTC.
 
+[![Watch the video](https://img.youtube.com/vi/qaVM5GoHLPA/maxresdefault.jpg)](https://www.youtube.com/watch?v=qaVM5GoHLPA)
+
 Runs on two platforms from the same code:
 
 - **Linux + NVIDIA** — works well on a single NVIDIA Blackwell GPU with 32 GB+ VRAM (hosts the full avatar pipeline + a 4B LLM alongside). Default configuration is single-GPU; a `--dual-gpu` opt-in splits the avatar onto a second card for extra headroom.
