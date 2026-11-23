@@ -75,7 +75,7 @@ Upstream AvatarForcing is a research reference implementation that OOMs within a
 
 The model-side edits (RoPE pre-slice, CFG collapse, KV-update fold, torch.compile mode wiring) live in a fork of AvatarForcing at [johnrobinsn/AvatarForcing](https://github.com/johnrobinsn/AvatarForcing), referenced here as a git submodule.
 
-On Apple Silicon (details in [`mlx_port/MLX_PERF.md`](mlx_port/MLX_PERF.md)):
+On Apple Silicon (details in [`mlx_port/MLX_PERF.md`](mlx_port/MLX_PERF.md)). The port is also published on its own, as an installable package with a CLI, as [avatarforcing-mlx](https://github.com/johnrobinsn/avatarforcing-mlx); use that if you want AvatarForcing on a Mac without the voice chat. AvatarVoice uses the in-tree copy in `mlx_port/`.
 
 - **Flow transformer + sampler ported to MLX** — ~40–60 ms per block, verified against the PyTorch code (sampling loop within ~1e-5 in float32; per-frame SSIM 0.9975 vs the fp32 reference).
 - **Motion decoder 613 → 150 ms per block on MPS** — exact rewrites of its modulated convolutions, `upfirdn2d` and the warp grid, pure fp16, and `torch.compile` (MLX convolutions turned out slower at 512×512, so it stays on PyTorch).
@@ -96,7 +96,8 @@ AvatarVoice/
 ├── webrtc/                  earlier single-track streaming demo (kept for reference)
 ├── scripts/                 download_models.py (used by `avatarvoice download`) and utilities
 ├── mlx_port/                MLX port of the flow transformer + sampler, fast MPS decoder kernels,
-│                            weight converter, equivalence tests, benchmarks (MLX_PERF.md)
+│                            weight converter, equivalence tests, benchmarks (MLX_PERF.md);
+│                            standalone package: johnrobinsn/avatarforcing-mlx
 ├── data/                    avatar portraits (rumi, vicky, ken); sources in data/CREDITS.md
 └── avatarforcing/           submodule → johnrobinsn/AvatarForcing (fork of TaekyungKi's)
 ```
@@ -169,7 +170,7 @@ uv venv --no-config --python 3.12 .venv-llm && uv pip install --no-config --pyth
 uv run avatarvoice run          # starts the LLM + voice servers, opens the browser; Ctrl-C stops both
 ```
 
-Open `http://<host>:8082` in a browser, pick an avatar, click **Start session**, and talk. On a laptop, use headphones: the avatar's voice from the speakers can otherwise be heard as you talking over it.
+Open `http://<host>:8082` in a browser, pick an avatar, click **Start session**, and talk. On a laptop, use headphones: the avatar's voice from the speakers can otherwise be heard as you talking over it. If it doesn't react when you speak, lower **RMS gate** in the gear panel (default 0.014); raise it if background noise sets it off.
 
 ### Running the servers yourself
 
@@ -234,7 +235,7 @@ uv run python voicechat/server.py --port 8082
 | `AF_COMPILE_MODE` | `reduce-overhead` | torch | torch.compile mode for the flow transformer. Set `default` to drop CUDA graphs. |
 | `AF_MAE_COMPILE_MODE` | `default` | torch | torch.compile mode for the MAE decoder. Set `reduce-overhead` for +~5% speed at the cost of ~6 GB persistent VRAM. |
 | `AF_SINGLE_GPU` | (unset) | torch | `1` forces single-GPU; `0` forces dual-GPU. Overrides CLI flag if set. |
-| `AF_LLM_BASE_URL` | `http://localhost:8000/v1` | mlx | OpenAI-compatible LLM endpoint. |
+| `AF_LLM_BASE_URL` | `http://localhost:8000/v1` | both | OpenAI-compatible LLM endpoint. |
 | `AF_MLX_FLOW_DTYPE` | `float32` | mlx | Flow-transformer precision; `bfloat16` is ~25 ms/block faster but drifts further from the fp32 reference. |
 
 ### Health / debug endpoints

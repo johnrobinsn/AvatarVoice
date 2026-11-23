@@ -251,7 +251,8 @@ def init_singletons(avatar_ref_path: str = None, single_gpu: bool = False):
     TTS = PhononTTS()
 
     log.info("creating vLLM client")
-    LLM = VLLMClient(model=os.environ.get("AF_LLM_MODEL", "cyankiwi/Qwen3-4B-Instruct-2507-AWQ-4bit"))
+    LLM = VLLMClient(model=os.environ.get("AF_LLM_MODEL", "cyankiwi/Qwen3-4B-Instruct-2507-AWQ-4bit"),
+                     base_url=os.environ.get("AF_LLM_BASE_URL", "http://localhost:8000/v1"))
 
     # Preprocess the avatar reference portrait once
     ref_path = avatar_ref_path or str(ROOT / "data/rumi.jpg")
