@@ -301,8 +301,11 @@ class Session:
         self.t0 = time.monotonic()
         self.user_audio_ring = AudioRing(capacity_seconds=30.0, sample_rate=16000)
         self.user_video_ring = VideoRing(capacity_seconds=30.0, fps=25)
-        self.avatar_audio_feat_ring = FeatureRing(capacity_seconds=30.0, fps=25, dim=512)
-        self.avatar_audio_pcm_ring  = AudioRing(capacity_seconds=30.0, sample_rate=16000)
+        # LLM + TTS run faster than realtime, so a whole reply is scheduled ahead of
+        # playback: these grow to hold it (~115 KB per second of queued speech), and
+        # the avatar worker releases what has played (AvatarWorker._release_played).
+        self.avatar_audio_feat_ring = FeatureRing(capacity_seconds=None, fps=25, dim=512)
+        self.avatar_audio_pcm_ring  = AudioRing(capacity_seconds=None, sample_rate=16000)
         # Tiny jitter buffer (~200 ms). Worker's blocking put + wall-clock
         # pacing keeps the pipeline synced to realtime; the queue just
         # absorbs typical per-block variance (we see 100-200 ms spikes).
@@ -628,19 +631,19 @@ def make_vad(session: Session) -> VADWorker:
         if not session.barge_in_enabled:
             log.info(f"[{session.id}] SOS ignored: barge-in disabled")
             return
-        # Barge-in semantics: stop producing new output, but let any
-        # already-buffered audio play through to natural phrase end. Hard
-        # cutting the ring at playhead was slicing off the final word of
-        # whatever the avatar was in the middle of saying (false VAD
-        # trigger from mic-leaked avatar audio was the common cause).
+        # Barge-in: the avatar stops talking at once and listens.
         #   (1) cancel the in-flight reply so no more LLM/TTS phrases arrive
-        #   (2) drop any TTS already queued for wav2vec on the worker
+        #   (2) drop TTS not yet scheduled and cut the audio + feature rings at the
+        #       audio playback cursor (same position AvatarAudioTrack reads). LLM +
+        #       TTS run faster than realtime, so most of a reply is usually already
+        #       in the rings; letting it play out meant barge-in did nothing.
         barged = session.reply_task and not session.reply_task.done()
         if barged:
             log.info(f"[{session.id}] barge-in: cancelling reply_task")
             session.reply_task.cancel()
         if AVATAR_WORKER is not None:
-            AVATAR_WORKER.cancel_pending_tts()
+            cursor = session.now() - (_playback_delay(AVATAR_WORKER) + session.lipsync_offset_s)
+            AVATAR_WORKER.barge_in(max(0.0, cursor))
 
     async def on_done(audio: np.ndarray, start_ts: float, end_ts: float):
         log.info(f"[{session.id}] turn complete: {end_ts - start_ts:.2f}s audio")

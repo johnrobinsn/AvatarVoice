@@ -89,6 +89,10 @@ class AvatarWorker(threading.Thread):
         # Serializes start_session / end_session / worker-consume so a
         # start_session arriving during cleanup can't be clobbered.
         self._state_lock = threading.Lock()
+        # Barge-in: barge_in() bumps the epoch under _sched_lock; a phrase whose
+        # wav2vec started in an older epoch is dropped instead of scheduled.
+        self._sched_lock = threading.Lock()
+        self._tts_epoch = 0
         # Pink-noise "room tone" features — computed once in _warmup, read in
         # _features_from_feat_ring. Keeps the avatar's mouth quiet during idle
         # by feeding in-distribution noise features instead of zeros.
@@ -153,20 +157,57 @@ class AvatarWorker(threading.Thread):
         except queue.Full:
             log.warning("tts_in_q full, dropping phrase")
 
-    def cancel_pending_tts(self) -> int:
-        """Drain the tts input queue. Called from on-barge-in so already-TTS'd
-        phrases don't get wav2vec'd and written to the rings after the user
-        started speaking. Returns how many phrases were dropped."""
-        dropped = 0
-        while True:
-            try:
-                self.tts_in_q.get_nowait()
-                dropped += 1
-            except queue.Empty:
-                break
-        if dropped:
-            log.info(f"avatar worker: cancelled {dropped} pending tts phrase(s)")
-        return dropped
+    def barge_in(self, cut_ts: float) -> None:
+        """Stop the avatar talking now (called on the user's start-of-speech).
+
+        Drops TTS phrases not yet scheduled (queued, or mid-wav2vec) and cuts the
+        PCM and feature rings at `cut_ts`, the audio playback cursor: playback
+        goes silent at once, and from there the model is fed the idle (pink-noise)
+        features _features_from_feat_ring substitutes past the ring's end.
+        Frames already generated ahead of playback (< ~0.6 s) still play out."""
+        with self._sched_lock:
+            self._tts_epoch += 1
+            dropped = 0
+            while True:
+                try:
+                    self.tts_in_q.get_nowait()
+                    dropped += 1
+                except queue.Empty:
+                    break
+            cut_s = max(0.0, self.pcm_ring.write_ts - cut_ts) if self.pcm_ring is not None else 0.0
+            if self.pcm_ring is not None:
+                self.pcm_ring.truncate_at(cut_ts)
+            if self.af_ring is not None:
+                self.af_ring.truncate_at(cut_ts)
+        log.info(f"avatar worker: barge-in at {cut_ts:.2f}: cut {cut_s:.2f}s of queued audio, "
+                 f"dropped {dropped} pending phrase(s)")
+
+    # Audio + features kept behind the session clock. Playback reads ≤ ~1 s behind
+    # it (playback delay + lip-sync offset), the worker's windows are ahead of it.
+    RELEASE_MARGIN_S = 10.0
+
+    def _release_played(self) -> None:
+        """Free avatar audio/features that have played (those rings grow; see Session)."""
+        t = self.now() - self.RELEASE_MARGIN_S
+        if t > 0:
+            self.pcm_ring.release_before(t)
+            self.af_ring.release_before(t)
+
+    def _schedule_phrase(self, epoch: int, phrase: str, feats_np: np.ndarray,
+                         pcm_16k: np.ndarray, w2v_ms: float, tag: str) -> None:
+        """Write a wav2vec'd phrase into the rings at the start of the next block the
+        worker will generate (anything between playhead and gen_horizon was drawn
+        without it). Skipped if a barge-in happened since its wav2vec started."""
+        with self._sched_lock:
+            if epoch != self._tts_epoch:
+                log.info(f"[{tag}] phrase={phrase[:40]!r} dropped (barge-in)")
+                return
+            horizon = getattr(self, "gen_horizon", self.playhead())
+            target_ts = max(self.af_ring.write_ts, self.pcm_ring.write_ts, horizon)
+            self.af_ring.write(feats_np, start_ts=target_ts)
+            self.pcm_ring.write(pcm_16k, start_ts=target_ts)
+        log.info(f"[{tag}] phrase={phrase[:40]!r} audio={pcm_16k.size/16000:.2f}s "
+                 f"w2v={w2v_ms:.0f}ms scheduled@{target_ts:.2f}")
 
     def end_session(self):
         with self._state_lock:
@@ -473,6 +514,7 @@ class AvatarWorker(threading.Thread):
             return
 
         while not self._shutdown.is_set():
+            epoch = self._tts_epoch
             try:
                 phrase, pcm_16k = self.tts_in_q.get(timeout=0.1)
             except queue.Empty:
@@ -496,15 +538,7 @@ class AvatarWorker(threading.Thread):
                 # main worker's default stream.
                 feats_np = feats[0].float().cpu().numpy()
                 ms = (time.perf_counter() - tt) * 1000
-                # Schedule at the start of the next block the main worker will
-                # generate — avoids writing features into a block that's
-                # already been drawn without them.
-                horizon = getattr(self, "gen_horizon", self.playhead())
-                target_ts = max(self.af_ring.write_ts, self.pcm_ring.write_ts, horizon)
-                self.af_ring.write(feats_np, start_ts=target_ts)
-                self.pcm_ring.write(pcm_16k, start_ts=target_ts)
-                log.info(f"[wav2vec-thread] phrase={phrase[:40]!r} audio={pcm_16k.size/16000:.2f}s "
-                         f"w2v={ms:.0f}ms scheduled@{target_ts:.2f}")
+                self._schedule_phrase(epoch, phrase, feats_np, pcm_16k, ms, "wav2vec-thread")
             except Exception:
                 log.exception("[wav2vec-thread] phrase processing failed")
 
@@ -839,6 +873,7 @@ class AvatarWorker(threading.Thread):
             # TTS scheduling targets a block whose avatar frames haven't been
             # produced yet.
             self.gen_horizon = next_block_ts
+            self._release_played()
             # Measure compute time BEFORE pacing sleep for the EWMA — the
             # delay knob wants to know how long the model actually takes,
             # not how long we spent idle keeping pace.

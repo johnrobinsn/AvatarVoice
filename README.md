@@ -69,7 +69,7 @@ Upstream AvatarForcing is a research reference implementation that OOMs within a
 - **Pipelined decode** on a side CUDA stream — motion autoencoder of block N overlaps with denoise of block N+1.
 - **Wall-clock-paced worker** + adaptive playback delay keyed on the worker's EWMA block time.
 - **Pink-noise idle features**: zero audio features are out-of-distribution for wav2vec2 and cause phantom silent-mouthing. 5 s of shaped pink noise at -50 dBFS, encoded once at startup, cycled during silence.
-- **Soft barge-in**: three-layer mic protection (RMS gate, Silero threshold, sustained-speech hysteresis) plus cancel-future-but-finish-in-flight semantics.
+- **Barge-in**: three-layer mic protection (RMS gate, Silero threshold, sustained-speech hysteresis); when you start talking, the avatar stops mid-sentence — queued audio is cut at the playback cursor and the model is fed silence.
 - **Wav2vec on a dedicated CUDA side-stream thread** — overlaps audio-feature extraction with the flow transformer so start-of-phrase doesn't stutter.
 - **Fresh logs on every start**: `logs/server.log` is truncated by the server process regardless of how it's launched.
 

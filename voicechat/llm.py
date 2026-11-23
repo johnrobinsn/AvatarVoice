@@ -52,7 +52,8 @@ class VLLMClient:
             "model": self.model,
             "messages": messages,
             "stream": True,
-            "max_tokens": 300,
+            # Only a runaway guard (~10 min of speech); the system prompt keeps replies short.
+            "max_tokens": 2000,
             "temperature": 0.7,
             "top_p": 0.95,
         }

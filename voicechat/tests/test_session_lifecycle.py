@@ -13,6 +13,11 @@ Regression tests for session-lifecycle bugs (no GPU or models needed).
      never written.
   4. Mic frames arriving with a few ms of jitter were zero-filled by the ring,
      chopping the start of speech (VAD missed the first words of a turn).
+  5. Barge-in only stopped phrases not yet scheduled; LLM + TTS run faster than
+     realtime, so the whole reply was usually already in the rings and kept playing.
+  6. The avatar's audio rings were fixed 30 s circular buffers, but a whole reply is
+     scheduled ahead of playback: a long one overwrote audio not yet played, and the
+     avatar went silent mid-reply.
 
     python -u voicechat/tests/test_session_lifecycle.py
 """
@@ -86,6 +91,45 @@ def test_emit_gives_up_when_session_ends():
     w._session_end.set()
     t.join(timeout=1.0)
     assert not t.is_alive(), "_emit_pixel_block still blocked after the session ended"
+
+
+def test_barge_in_cuts_scheduled_audio():
+    import torch
+    from voicechat.avatar_worker import AvatarWorker
+    from voicechat.rings import FeatureRing
+    w = AvatarWorker(af_model=None, avatar_ref_tensor=torch.zeros(1, 3, 8, 8), device="cpu")
+    w.pcm_ring, w.af_ring = AudioRing(30.0, 16000), FeatureRing(30.0, 25, 512)
+    w.playhead = lambda: 1.0
+    w.gen_horizon = 1.0
+    def phrase(seconds):
+        return np.ones((int(seconds * 25), 512), np.float32), np.ones(int(seconds * 16000), np.float32)
+    w._schedule_phrase(w._tts_epoch, "a", *phrase(4.0), 0.0, "test")   # reply already in the rings
+    w._schedule_phrase(w._tts_epoch, "b", *phrase(4.0), 0.0, "test")
+    epoch = w._tts_epoch                                                # wav2vec of "c" in flight
+    w.submit_tts("d", np.ones(16000, np.float32))                       # queued, not yet processed
+    w.barge_in(2.5)
+    w._schedule_phrase(epoch, "c", *phrase(2.0), 0.0, "test")           # "c" finishes after the cut
+    assert abs(w.pcm_ring.write_ts - 2.5) < 1e-6 and abs(w.af_ring.write_ts - 2.5) < 0.04
+    assert w.tts_in_q.empty(), "queued phrase survived barge-in"
+    assert not w.pcm_ring.read_window(2.5, 9.0).any(), "audio after the cut still plays"
+    w._schedule_phrase(w._tts_epoch, "next reply", *phrase(1.0), 0.0, "test")
+    assert w.pcm_ring.write_ts > 2.5, "the next reply after a barge-in isn't scheduled"
+
+
+def test_avatar_rings_hold_a_long_reply():
+    from voicechat.rings import FeatureRing
+    pcm, feats = AudioRing(None, 16000), FeatureRing(None, 25, 512)
+    for k in range(40):                                  # a 120 s reply, written 1 s into the session
+        pcm.write(np.full(3 * 16000, k + 1, np.float32), start_ts=1.0 + 3 * k)
+        feats.write(np.full((75, 512), k + 1, np.float32), start_ts=1.0 + 3 * k)
+    assert (pcm.read_window(1.0, 4.0) == 1).all(), "start of the reply was overwritten"
+    assert (pcm.read_window(118.0, 121.0) == 40).all() and (feats.read_window(118.0, 121.0) == 40).all()
+    pcm.release_before(100.0)                            # played: freed; the rest still plays
+    assert not pcm.read_window(1.0, 4.0).any() and (pcm.read_window(100.0, 103.0) == 34).all()
+    pcm.release_before(500.0)                            # idle a long time, then the next reply
+    pcm.write(np.ones(16000, np.float32), start_ts=600.0)
+    assert pcm._buf.shape[0] < 60 * 16000, "idle gap was zero-filled into the buffer"
+    assert (pcm.read_window(600.0, 601.0) == 1).all()
 
 
 def test_video_ring_allocates_lazily():

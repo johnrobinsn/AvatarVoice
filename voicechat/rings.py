@@ -23,217 +23,145 @@ from typing import Optional
 import numpy as np
 
 
-class AudioRing:
-    """16 kHz f32 mono audio ring. Thread-safe. Zero-pads underflows."""
+class _TimeSeries:
+    """Time-indexed buffer of items (audio samples or feature frames) at a fixed
+    rate. Thread-safe. Item i covers time i / rate.
 
-    def __init__(self, capacity_seconds: float = 30.0, sample_rate: int = 16000):
-        self.sample_rate = sample_rate
-        self.capacity = int(capacity_seconds * sample_rate)
-        self._buf = np.zeros(self.capacity, dtype=np.float32)
-        self._write_pos = 0        # index into buffer (mod capacity)
-        self._write_ts: float = 0.0  # wall-clock of next unwritten sample
-        self._start_ts: float = 0.0  # wall-clock of oldest sample still in buf
+    capacity_seconds: keep only that long behind write_ts, like a ring buffer
+    (fixed memory; for buffers written in real time, e.g. the mic).
+    None: grow as needed and keep everything until release_before() — for buffers
+    written AHEAD of their reader (the avatar's TTS is scheduled a whole reply
+    ahead of playback), where dropping the oldest data would drop audio that
+    hasn't played yet.
+    """
+
+    def __init__(self, rate: int, item_shape: tuple, dtype, capacity_seconds: Optional[float]):
+        self._rate = rate
+        self._item_shape = item_shape
+        self._dtype = dtype
+        self._keep = None if capacity_seconds is None else int(round(capacity_seconds * rate))
+        self._min_len = 2 * self._keep if self._keep else 10 * rate
+        self._buf = np.zeros((self._min_len,) + item_shape, dtype)
+        self._off = 0      # item index of _buf[0]
+        self._begin = 0    # item index of the oldest item held
+        self._end = 0      # item index of the next unwritten item (write_ts * rate)
         self._lock = threading.Lock()
 
     @property
     def write_ts(self) -> float:
         with self._lock:
-            return self._write_ts
+            return self._end / self._rate
 
-    def write(self, samples: np.ndarray, start_ts: Optional[float] = None) -> None:
-        """Append samples. If start_ts is given and > current write_ts we zero-pad
-        the gap; if < write_ts we silently overwrite (shouldn't normally happen)."""
-        assert samples.dtype == np.float32, f"expected f32, got {samples.dtype}"
-        samples = np.ascontiguousarray(samples).ravel()
+    def _write(self, items: np.ndarray, start_ts: Optional[float]) -> None:
         with self._lock:
-            if start_ts is not None and start_ts > self._write_ts + 0.5 / self.sample_rate:
-                # Gap: fill with silence
-                gap_n = int(round((start_ts - self._write_ts) * self.sample_rate))
-                if gap_n > 0:
-                    self._put(np.zeros(gap_n, dtype=np.float32))
-            self._put(samples)
+            if start_ts is not None:
+                idx = int(round(start_ts * self._rate))
+                if idx > self._end:
+                    if self._begin == self._end:          # empty: no need to store the gap
+                        self._begin = self._end = self._off = idx
+                    else:                                 # gap: silence
+                        self._append(np.zeros((idx - self._end,) + self._item_shape, self._dtype))
+                # start_ts < write_ts (shouldn't normally happen): append at write_ts
+            self._append(items)
 
-    def _put(self, samples: np.ndarray) -> None:
-        n = samples.shape[0]
+    def _append(self, items: np.ndarray) -> None:
+        n = items.shape[0]
         if n == 0:
             return
-        if n >= self.capacity:
-            # Overwrite everything; keep only tail that fits. write_ts must
-            # advance by the ORIGINAL sample count, not capacity — otherwise a
-            # gap-fill larger than the ring loses the extra seconds and all
-            # subsequent writes land at the wrong logical ts.
-            original_n = n
-            samples = samples[-self.capacity:]
-            self._buf[:] = samples
-            self._write_pos = 0
-            self._write_ts += original_n / self.sample_rate
-            self._start_ts = self._write_ts - self.capacity / self.sample_rate
+        if self._keep is not None and n >= self._keep:   # only the tail survives
+            self._begin = self._off = self._end + n - self._keep
+            self._buf[:self._keep] = items[-self._keep:]
+            self._end += n
             return
-        end = self._write_pos + n
-        if end <= self.capacity:
-            self._buf[self._write_pos:end] = samples
-        else:
-            k = self.capacity - self._write_pos
-            self._buf[self._write_pos:] = samples[:k]
-            self._buf[:n - k] = samples[k:]
-        self._write_pos = end % self.capacity
-        self._write_ts += n / self.sample_rate
-        self._start_ts = max(0.0, self._write_ts - self.capacity / self.sample_rate)
+        need = self._end + n - self._begin
+        if self._end + n - self._off > len(self._buf):
+            # Out of room at the back: move the held items to the front of a buffer
+            # sized for them (grows for a long reply, shrinks back once it has played).
+            held = self._buf[self._begin - self._off:self._end - self._off]
+            size = len(self._buf) if self._keep else max(2 * need, self._min_len)
+            if size != len(self._buf):
+                new = np.zeros((size,) + self._item_shape, self._dtype)
+                new[:len(held)] = held
+                self._buf = new
+            else:
+                self._buf[:len(held)] = held.copy()
+            self._off = self._begin
+        self._buf[self._end - self._off:self._end - self._off + n] = items
+        self._end += n
+        if self._keep is not None:
+            self._begin = max(self._begin, self._end - self._keep)
 
     def truncate_at(self, ts: float) -> None:
-        """Rewind write_ts to `ts`, discarding any content buffered at ts or
-        later. Used for barge-in: future TTS that was pre-scheduled into the
-        ring gets cut off at the user's start-of-speech. Reads past the new
-        write_ts return zero-padded silence (same as the normal underflow
-        path)."""
+        """Rewind write_ts to `ts`, discarding anything at or after it. Used for
+        barge-in: TTS scheduled ahead of playback is cut at the playback cursor.
+        Reads past the new write_ts return zeros (silence)."""
         with self._lock:
-            if ts >= self._write_ts:
-                return
-            samples_back = int(round((self._write_ts - ts) * self.sample_rate))
-            samples_back = min(samples_back, self.capacity)
-            self._write_pos = (self._write_pos - samples_back) % self.capacity
-            self._write_ts = ts
+            self._end = max(self._begin, min(self._end, int(round(ts * self._rate))))
+
+    def release_before(self, ts: float) -> None:
+        """Drop everything before `ts` (the reader is done with it). If that empties
+        the buffer, write_ts jumps to `ts`, so the next write after a long idle
+        spell doesn't zero-fill the whole gap."""
+        with self._lock:
+            idx = int(round(ts * self._rate))
+            if idx >= self._end:
+                self._begin = self._end = self._off = max(idx, self._end)
+                if not self._keep and len(self._buf) > self._min_len:   # a long reply has played
+                    self._buf = np.zeros((self._min_len,) + self._item_shape, self._dtype)
+            elif idx > self._begin:
+                self._begin = idx
+
+    def _read(self, t0: float, t1: float) -> np.ndarray:
+        """Exactly round((t1-t0)*rate) items covering [t0, t1); anything not held
+        (before the oldest item, in a gap, past write_ts) is zeros."""
+        n_total = int(round((t1 - t0) * self._rate))
+        out = np.zeros((max(0, n_total),) + self._item_shape, self._dtype)
+        with self._lock:
+            i0 = int(round(t0 * self._rate))
+            a, b = max(i0, self._begin), min(i0 + n_total, self._end)
+            if b > a:
+                out[a - i0:b - i0] = self._buf[a - self._off:b - self._off]
+        return out
+
+
+class AudioRing(_TimeSeries):
+    """16 kHz f32 mono audio. Zero-pads underflows (silence). See _TimeSeries for
+    capacity_seconds (None = grow; the reader calls release_before)."""
+
+    def __init__(self, capacity_seconds: Optional[float] = 30.0, sample_rate: int = 16000):
+        self.sample_rate = sample_rate
+        super().__init__(sample_rate, (), np.float32, capacity_seconds)
+
+    def write(self, samples: np.ndarray, start_ts: Optional[float] = None) -> None:
+        """Append samples. If start_ts is given and > write_ts the gap is silence;
+        if < write_ts the samples are appended at write_ts."""
+        assert samples.dtype == np.float32, f"expected f32, got {samples.dtype}"
+        self._write(np.ascontiguousarray(samples).ravel(), start_ts)
 
     def read_window(self, t0: float, t1: float) -> np.ndarray:
-        """Return exactly round((t1-t0)*sr) samples covering [t0, t1).
-        Missing head (before start_ts) and missing tail (after write_ts)
-        are zero-padded."""
-        with self._lock:
-            n_total = int(round((t1 - t0) * self.sample_rate))
-            if n_total <= 0:
-                return np.zeros(0, dtype=np.float32)
-            out = np.zeros(n_total, dtype=np.float32)
-
-            # Clip the requested window to what the ring actually holds
-            avail_t0 = max(t0, self._start_ts)
-            avail_t1 = min(t1, self._write_ts)
-            if avail_t1 - avail_t0 < 0.5 / self.sample_rate:
-                return out  # entirely outside ring; zeros
-
-            # Where in `out` does the available portion go?
-            out_start = int(round((avail_t0 - t0) * self.sample_rate))
-            out_end = int(round((avail_t1 - t0) * self.sample_rate))
-
-            # Where in the ring is the available portion?
-            # Offset from write_pos going backwards.
-            offset_from_end = int(round((self._write_ts - avail_t1) * self.sample_rate))
-            chunk_n = out_end - out_start
-            if chunk_n <= 0:
-                return out
-            # Compute the start index in buffer
-            start_idx = (self._write_pos - offset_from_end - chunk_n) % self.capacity
-            end_idx = (start_idx + chunk_n) % self.capacity
-            if end_idx > start_idx:
-                out[out_start:out_end] = self._buf[start_idx:end_idx]
-            else:
-                k = self.capacity - start_idx
-                out[out_start:out_start + k] = self._buf[start_idx:]
-                out[out_start + k:out_end] = self._buf[:end_idx]
-            return out
+        return self._read(t0, t1)
 
 
-class FeatureRing:
-    """Frame-aligned feature ring (e.g. wav2vec features at 25 fps).
+class FeatureRing(_TimeSeries):
+    """Frame-aligned features (e.g. wav2vec at 25 fps). Same semantics as
+    AudioRing with a feature vector per frame: a gap, the missing head and the
+    unwritten tail read as zero frames."""
 
-    Same zero-pad semantics as AudioRing but a feature vector per frame instead
-    of a scalar sample. Reads for a window past write_ts zero-pad the tail (=
-    silence equivalent in feature space); reads before the backing buffer
-    zero-pad the head.
-    """
-
-    def __init__(self, capacity_seconds: float = 30.0, fps: int = 25, dim: int = 512,
+    def __init__(self, capacity_seconds: Optional[float] = 30.0, fps: int = 25, dim: int = 512,
                  dtype: np.dtype = np.float32):
         self.fps = fps
         self.dim = dim
         self.dtype = dtype
-        self.capacity = int(capacity_seconds * fps)
-        self._buf = np.zeros((self.capacity, dim), dtype=dtype)
-        self._write_pos = 0
-        self._write_ts: float = 0.0
-        self._start_ts: float = 0.0
-        self._lock = threading.Lock()
-
-    @property
-    def write_ts(self) -> float:
-        with self._lock:
-            return self._write_ts
+        super().__init__(fps, (dim,), dtype, capacity_seconds)
 
     def write(self, feats: np.ndarray, start_ts: Optional[float] = None) -> None:
-        """Append `feats` of shape [T, dim]. If start_ts > write_ts we zero-pad
-        the gap with zero-feature frames."""
+        """Append `feats` of shape [T, dim]; a gap before start_ts is zero frames."""
         assert feats.ndim == 2 and feats.shape[1] == self.dim, \
             f"expected (T, {self.dim}), got {feats.shape}"
-        feats = np.ascontiguousarray(feats, dtype=self.dtype)
-        with self._lock:
-            if start_ts is not None and start_ts > self._write_ts + 0.5 / self.fps:
-                gap_n = int(round((start_ts - self._write_ts) * self.fps))
-                if gap_n > 0:
-                    self._put(np.zeros((gap_n, self.dim), dtype=self.dtype))
-            self._put(feats)
-
-    def _put(self, feats: np.ndarray) -> None:
-        n = feats.shape[0]
-        if n == 0:
-            return
-        if n >= self.capacity:
-            # Same gap-overflow fix as AudioRing: advance write_ts by the
-            # ORIGINAL n, not capacity, so a huge gap-fill doesn't lose time.
-            original_n = n
-            feats = feats[-self.capacity:]
-            self._buf[:] = feats
-            self._write_pos = 0
-            self._write_ts += original_n / self.fps
-            self._start_ts = self._write_ts - self.capacity / self.fps
-            return
-        end = self._write_pos + n
-        if end <= self.capacity:
-            self._buf[self._write_pos:end] = feats
-        else:
-            k = self.capacity - self._write_pos
-            self._buf[self._write_pos:] = feats[:k]
-            self._buf[:n - k] = feats[k:]
-        self._write_pos = end % self.capacity
-        self._write_ts += n / self.fps
-        self._start_ts = max(0.0, self._write_ts - self.capacity / self.fps)
-
-    def truncate_at(self, ts: float) -> None:
-        """Rewind write_ts to `ts`, discarding anything at or after that time.
-        Used for barge-in."""
-        with self._lock:
-            if ts >= self._write_ts:
-                return
-            frames_back = int(round((self._write_ts - ts) * self.fps))
-            frames_back = min(frames_back, self.capacity)
-            self._write_pos = (self._write_pos - frames_back) % self.capacity
-            self._write_ts = ts
+        self._write(np.ascontiguousarray(feats, dtype=self.dtype), start_ts)
 
     def read_window(self, t0: float, t1: float) -> np.ndarray:
-        with self._lock:
-            n_total = int(round((t1 - t0) * self.fps))
-            if n_total <= 0:
-                return np.zeros((0, self.dim), dtype=self.dtype)
-            out = np.zeros((n_total, self.dim), dtype=self.dtype)
-
-            avail_t0 = max(t0, self._start_ts)
-            avail_t1 = min(t1, self._write_ts)
-            if avail_t1 - avail_t0 < 0.5 / self.fps:
-                return out  # effectively empty window; zeros
-
-            out_start = int(round((avail_t0 - t0) * self.fps))
-            out_end = int(round((avail_t1 - t0) * self.fps))
-            chunk_n = out_end - out_start
-            if chunk_n <= 0:
-                return out
-            offset_from_end = int(round((self._write_ts - avail_t1) * self.fps))
-            start_idx = (self._write_pos - offset_from_end - chunk_n) % self.capacity
-            end_idx = (start_idx + chunk_n) % self.capacity
-            if end_idx > start_idx:
-                out[out_start:out_end] = self._buf[start_idx:end_idx]
-            else:
-                k = self.capacity - start_idx
-                out[out_start:out_start + k] = self._buf[start_idx:]
-                out[out_start + k:out_end] = self._buf[:end_idx]
-            return out
+        return self._read(t0, t1)
 
 
 class VideoRing:

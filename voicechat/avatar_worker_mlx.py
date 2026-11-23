@@ -2,7 +2,7 @@
 Avatar worker for Apple Silicon (AF_BACKEND=mlx).
 
 Same session interface and streaming behaviour as `AvatarWorker` (start_session /
-submit_tts / cancel_pending_tts / end_session, ring reads with pink-noise idle
+submit_tts / barge_in / end_session, ring reads with pink-noise idle
 features, wall-clock pacing, EWMA for the adaptive playback delay, periodic KV
 reanchor with crossfade) — the CUDA worker's session management, feature reads
 and pixel emission are inherited unchanged. What differs is the engine:
@@ -123,6 +123,7 @@ class MLXAvatarWorker(AvatarWorker):
         """wav2vec each queued TTS phrase and schedule features + PCM into the
         rings at the generation horizon (same scheduling as the CUDA worker)."""
         while True:
+            epoch = self._tts_epoch
             try:
                 phrase, pcm_16k = self.tts_in_q.get_nowait()
             except queue.Empty:
@@ -137,12 +138,7 @@ class MLXAvatarWorker(AvatarWorker):
                 tt = time.perf_counter()
                 feats_np = np.array(self.pipe.audio_features(pcm_16k, n_frames, normalize=False)[0])
                 ms = (time.perf_counter() - tt) * 1000
-                horizon = getattr(self, "gen_horizon", self.playhead())
-                target_ts = max(self.af_ring.write_ts, self.pcm_ring.write_ts, horizon)
-                self.af_ring.write(feats_np, start_ts=target_ts)
-                self.pcm_ring.write(pcm_16k, start_ts=target_ts)
-                log.info(f"[wav2vec] phrase={phrase[:40]!r} audio={pcm_16k.size/16000:.2f}s "
-                         f"w2v={ms:.0f}ms scheduled@{target_ts:.2f}")
+                self._schedule_phrase(epoch, phrase, feats_np, pcm_16k, ms, "wav2vec")
             except Exception:
                 log.exception("[wav2vec] phrase processing failed")
 
@@ -227,6 +223,7 @@ class MLXAvatarWorker(AvatarWorker):
 
             next_block_ts = max(block_end_ts, self.now())
             self.gen_horizon = next_block_ts
+            self._release_played()
             if compute_time > self.block_time_ewma:
                 self.block_time_ewma = 0.5 * self.block_time_ewma + 0.5 * compute_time
             else:
