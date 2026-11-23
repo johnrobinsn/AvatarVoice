@@ -15,12 +15,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
 import numpy as np
 import onnxruntime as ort
-import librosa  # for mel features
+from transformers import WhisperFeatureExtractor  # Smart Turn's input features
 
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -41,19 +42,30 @@ class TurnDetectorConfig:
     rms_gate: float = 0.014
     speech_prob_threshold: float = 0.6      # per-chunk confidence cutoff (was 0.7; originally 0.5, raised so low-volume mic-leaked avatar audio is below the bar)
     # Transition thresholds (hysteresis):
-    enter_speech_frames: int = 15     # 15 × 32 ms ≈ 480 ms of sustained (speech_prob ≥ threshold) before we fire SOS
-    exit_speech_frames: int = 20      # need N consecutive silence chunks to maybe end turn
+    # Start of speech: enter_speech_frames speech chunks (15 × 32 ms ≈ 480 ms) within the last
+    # enter_window_frames (24 ≈ 770 ms). Not consecutive: the gaps between words in choppy
+    # speech ("wait, hold on, stop") broke a consecutive run, so barge-ins were missed.
+    enter_speech_frames: int = 15
+    enter_window_frames: int = 24
+    # The turn's audio starts this long before its first speech chunk (soft onsets).
+    speech_preroll_s: float = 0.2
+    # Consecutive silence chunks before asking Smart Turn (6 × 32 ms ≈ 200 ms). Smart Turn
+    # only tells finished from unfinished speech this early: by ~600 ms of silence it calls
+    # almost everything finished.
+    exit_speech_frames: int = 6
     # Smart Turn:
     smart_turn_window_s: float = 8.0  # how much trailing audio to feed Smart Turn
     smart_turn_prob_threshold: float = 0.5
     # How often to re-check smart turn once we're in "trailing silence"
     smart_turn_recheck_interval_s: float = 0.25
+    # End the turn after this much silence even if Smart Turn still says "not done".
+    max_trailing_silence_s: float = 2.0
 
 
 @dataclass
 class _State:
     in_speech: bool = False
-    n_speech_frames_in_window: int = 0
+    recent: deque = field(default_factory=lambda: deque(maxlen=256))   # per-chunk is_speech
     n_silence_frames_in_window: int = 0
     speech_start_ts: Optional[float] = None
     last_smart_turn_check_ts: float = 0.0
@@ -83,8 +95,9 @@ class VADWorker:
         self._silero = load_silero_vad()
         self._silero.reset_states()
 
-        # Load Smart Turn ONNX
+        # Load Smart Turn ONNX, with the feature extractor it was trained on
         self._smart = ort.InferenceSession(smart_turn_onnx_path, providers=["CPUExecutionProvider"])
+        self._smart_fe = WhisperFeatureExtractor(chunk_length=int(self.cfg.smart_turn_window_s))
 
         # Sliding read cursor through the audio ring
         self._read_ts: float = 0.0
@@ -117,19 +130,23 @@ class VADWorker:
                 prob = float(self._silero(torch.from_numpy(chunk), sr).item())
             is_speech = prob > self.cfg.speech_prob_threshold
 
+            self.state.recent.append(is_speech)
             if is_speech:
-                self.state.n_speech_frames_in_window += 1
                 self.state.n_silence_frames_in_window = 0
             else:
                 self.state.n_silence_frames_in_window += 1
-                self.state.n_speech_frames_in_window = 0
 
             if not self.state.in_speech:
-                # Entering speech?
-                if self.state.n_speech_frames_in_window >= self.cfg.enter_speech_frames:
+                # Entering speech? (the gear panel's "enter" knob can raise
+                # enter_speech_frames past the window, so the window grows with it)
+                n_window = max(self.cfg.enter_window_frames, self.cfg.enter_speech_frames)
+                window = list(self.state.recent)[-n_window:]
+                if sum(window) >= self.cfg.enter_speech_frames:
                     self.state.in_speech = True
-                    # Rewind start to account for the chunks we already consumed proving speech
-                    self.state.speech_start_ts = self._read_ts - chunk_s * self.cfg.enter_speech_frames
+                    # Rewind start to the window's first speech chunk, plus a little pre-roll
+                    first = window.index(True)
+                    self.state.speech_start_ts = max(
+                        0.0, self._read_ts - chunk_s * (len(window) - first) - self.cfg.speech_preroll_s)
                     log.info(f"[{self.tag}] start-of-speech @ {self.state.speech_start_ts:.2f}")
                     asyncio.create_task(self.on_start_of_speech(self.state.speech_start_ts))
             else:
@@ -139,7 +156,9 @@ class VADWorker:
                     if (self._read_ts - self.state.last_smart_turn_check_ts
                             >= self.cfg.smart_turn_recheck_interval_s):
                         self.state.last_smart_turn_check_ts = self._read_ts
-                        done = self._smart_turn_check(self._read_ts)
+                        silence_s = self.state.n_silence_frames_in_window * chunk_s
+                        done = (silence_s >= self.cfg.max_trailing_silence_s
+                                or self._smart_turn_check(self._read_ts))
                         if done:
                             start_ts = self.state.speech_start_ts
                             end_ts = self._read_ts
@@ -155,26 +174,14 @@ class VADWorker:
         sr = self.audio_ring.sample_rate
         start_ts = max(0.0, end_ts - self.cfg.smart_turn_window_s)
         audio = self.audio_ring.read_window(start_ts, end_ts)
-        # Right-pad to the exact 8 s expected by the model
+        # Same preprocessing as pipecat-ai/smart-turn's inference.py: the model expects the
+        # speech at the end of the 8 s window, so pad silence at the start.
         target = int(self.cfg.smart_turn_window_s * sr)
-        if audio.size < target:
-            audio = np.pad(audio, (0, target - audio.size))
-        else:
-            audio = audio[-target:]
-        # Whisper-style log-mel: 80 bins, 400 fft, 160 hop → ~800 frames for 8s
-        mel = librosa.feature.melspectrogram(
-            y=audio, sr=sr, n_mels=80, n_fft=400, hop_length=160, win_length=400, center=False,
-        )
-        log_mel = np.log(np.clip(mel, 1e-10, None)).astype(np.float32)
-        log_mel = np.clip(log_mel, log_mel.max() - 8.0, None)
-        log_mel = (log_mel + 4.0) / 4.0
-        # Pad/trim to exactly 800 frames
-        if log_mel.shape[1] < 800:
-            log_mel = np.pad(log_mel, ((0, 0), (0, 800 - log_mel.shape[1])))
-        log_mel = log_mel[:, :800]
-        inp = log_mel[None, ...]  # [1, 80, 800]
-        logit = float(self._smart.run(None, {"input_features": inp})[0].flatten()[0])
-        prob = 1.0 / (1.0 + np.exp(-logit))
+        audio = audio[-target:] if audio.size >= target else np.pad(audio, (target - audio.size, 0))
+        feats = self._smart_fe(audio, sampling_rate=sr, return_tensors="np", padding="max_length",
+                               max_length=target, truncation=True, do_normalize=True).input_features
+        # The graph ends in a Sigmoid (despite the output's name, "logits"): this is already a probability.
+        prob = float(self._smart.run(None, {"input_features": feats.astype(np.float32)})[0].flatten()[0])
         log.debug(f"[{self.tag}] smart-turn prob={prob:.3f} (threshold={self.cfg.smart_turn_prob_threshold})")
         return prob > self.cfg.smart_turn_prob_threshold
 
