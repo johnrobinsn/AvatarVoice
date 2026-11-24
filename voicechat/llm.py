@@ -37,6 +37,20 @@ class VLLMClient:
         self.max_history = max_history
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0))
 
+    def warmup(self) -> None:
+        """One tiny request at startup: the server's first request is ~0.5 s slower
+        (kernel setup, empty prompt cache), which would delay the first reply.
+        Synchronous, so it doesn't bind the async client to a temporary event loop."""
+        t0 = time.perf_counter()
+        try:
+            httpx.post(f"{self.base_url}/chat/completions", timeout=60.0, json={
+                "model": self.model, "max_tokens": 1, "messages": [
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": "Hi"}]}).raise_for_status()
+            log.info(f"llm: warmed up in {time.perf_counter() - t0:.2f}s")
+        except Exception as e:
+            log.warning(f"llm: warm-up failed ({e}); the first reply may be slower")
+
     def reset(self):
         self.history.clear()
 

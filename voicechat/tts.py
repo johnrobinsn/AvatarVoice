@@ -77,6 +77,11 @@ class PhononTTS:
         log.info(f"loaded in {time.perf_counter()-t0:.2f}s sr={self.sample_rate} voice={self.voice}")
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="af-tts")
+        # Warm-up on the TTS thread: the first phrase otherwise takes ~0.5 s longer
+        # to start, delaying the first reply of every session.
+        t0 = time.perf_counter()
+        self._executor.submit(lambda: sum(c.size for c in self._blocking_stream("Hello there."))).result()
+        log.info(f"warmed up in {time.perf_counter()-t0:.2f}s")
 
     def set_voice(self, voice: str) -> None:
         """Change the active voice. New phrases submitted after this call use

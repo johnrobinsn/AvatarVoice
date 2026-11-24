@@ -154,6 +154,7 @@ def init_singletons_mlx(avatar_ref_path: str = None):
     log.info("creating LLM client")
     LLM = VLLMClient(model=os.environ.get("AF_LLM_MODEL", "mlx-community/Qwen3-4B-Instruct-2507-4bit"),
                      base_url=os.environ.get("AF_LLM_BASE_URL", "http://localhost:8000/v1"))
+    LLM.warmup()
 
     ref_path = avatar_ref_path or str(ROOT / "data/rumi.jpg")
     log.info(f"preprocessing avatar ref: {ref_path}")
@@ -253,6 +254,7 @@ def init_singletons(avatar_ref_path: str = None, single_gpu: bool = False):
     log.info("creating vLLM client")
     LLM = VLLMClient(model=os.environ.get("AF_LLM_MODEL", "cyankiwi/Qwen3-4B-Instruct-2507-AWQ-4bit"),
                      base_url=os.environ.get("AF_LLM_BASE_URL", "http://localhost:8000/v1"))
+    LLM.warmup()
 
     # Preprocess the avatar reference portrait once
     ref_path = avatar_ref_path or str(ROOT / "data/rumi.jpg")

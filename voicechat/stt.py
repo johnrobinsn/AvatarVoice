@@ -191,6 +191,11 @@ class ParakeetMLXSTT:
         nn.quantize(model.encoder, group_size=64, bits=8)
         model.load_weights(weights)
         mx.eval(model.parameters())
+        # Warm-up: the first transcription builds the Metal kernels and takes ~1.2 s
+        # (vs ~0.1 s after), which would delay the first reply of every session.
+        from parakeet_mlx.audio import get_logmel
+        noise = np.random.default_rng(0).standard_normal(32000).astype(np.float32) * 0.01
+        model.generate(get_logmel(mx.array(noise), model.preprocessor_config))
         return model
 
     def _blocking_transcribe(self, audio: np.ndarray, language: str = "en") -> str:
