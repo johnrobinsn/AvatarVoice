@@ -170,7 +170,7 @@ uv venv --no-config --python 3.12 .venv-llm && uv pip install --no-config --pyth
 uv run avatarvoice run          # starts the LLM + voice servers, opens the browser; Ctrl-C stops both
 ```
 
-Open `http://<host>:8082` in a browser, pick an avatar, click **Start session**, and talk. On a laptop, use headphones: the avatar's voice from the speakers can otherwise be heard as you talking over it. If it doesn't react when you speak, lower **RMS gate** in the gear panel (default 0.014); raise it if background noise sets it off.
+Open `http://<host>:8082` in a browser, pick an avatar, click **Start session**, and talk. The browser's echo cancellation keeps the avatar from hearing its own voice from the speakers. If it doesn't react when you speak, lower **RMS gate** in the gear panel (default 0.014); raise it if background noise sets it off.
 
 ### Running the servers yourself
 
