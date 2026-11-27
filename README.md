@@ -148,9 +148,14 @@ Parakeet STT via onnx-asr / onnxruntime-gpu (faster-whisper as a fallback). The 
 uv run avatarvoice download
 ```
 
-AvatarForcing checkpoints (the authors' Google Drive, as in `avatarforcing/download_weights.sh`),
-wav2vec2, the STT model and the LLM weights; on macOS also the MLX conversion of the flow
-transformer. Skips anything already present; `--check` lists what's missing.
+AvatarForcing checkpoints, wav2vec2, the STT model and the LLM weights; on macOS also the MLX
+conversion of the flow transformer. Skips anything already present; `--check` lists what's missing.
+
+The motion autoencoder comes from the authors' Google Drive (as in `avatarforcing/download_weights.sh`).
+The flow transformer comes from an unmodified
+[Hugging Face mirror](https://huggingface.co/johnrobinsn/avatarforcing-flow-transformer) of the authors'
+file, because Google Drive often rate-limits it. If Drive refuses the motion autoencoder, the download
+retries, then prints a direct link and where to save the file; `avatarvoice download` picks up from there.
 
 ### 4. LLM server environment
 

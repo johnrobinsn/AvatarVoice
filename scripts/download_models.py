@@ -3,8 +3,10 @@
     python scripts/download_models.py            # skips anything already present
     python scripts/download_models.py --check    # report what's missing, download nothing
 
-Sources (nothing is rehosted):
-  - AvatarForcing checkpoints: the authors' Google Drive (as in avatarforcing/download_weights.sh)
+Sources:
+  - AvatarForcing motion autoencoder: the authors' Google Drive (as in avatarforcing/download_weights.sh)
+  - AvatarForcing flow transformer: an unmodified Hugging Face mirror of the authors' file (Drive
+    rate-limits it); attribution and license on the model card
   - everything else: Hugging Face, plus the face-alignment and Phonon voice files their
     libraries fetch on first use.
 """
@@ -24,9 +26,9 @@ MAC = sys.platform == "darwin" and platform.machine() == "arm64"
 
 GDRIVE = {   # avatarforcing/download_weights.sh
     "motion_autoencoder.pth": "1a0ZqX9GMrkb3JFQgOBmUB0V-Bpwtv4Hp",
-    "flow_transformer.pth": "1lchvHiDka0bBQ29bdY6lHxCyNGbGzvS_",
 }
-DRIVE_FOLDER = "https://drive.google.com/drive/folders/1rN52J2QXD8A-r2CZ8nDqFdwvZuPRmMsc"
+# Unmodified mirror of the authors' flow_transformer.pth (CC BY-NC 4.0; source and attribution on the model card)
+FLOW_MIRROR = ("johnrobinsn/avatarforcing-flow-transformer", "b6e0ca9b03770c6fe12fcbd58569841219bc0ac3")
 LLM_MAC = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 LLM_CUDA = "cyankiwi/Qwen3-4B-Instruct-2507-AWQ-4bit"
 PARAKEET = ("johnrobinsn/parakeet-tdt-0.6b-v2-mlx-q8", "aad991e02731e67298700cf1f2b86ddaa45dd18c")
@@ -69,17 +71,48 @@ def hf_fetch(repo, revision=None, patterns=None, local_dir=None):
     return snapshot_download(repo, revision=revision, allow_patterns=patterns, local_dir=local_dir)
 
 
+GDRIVE_RETRY_WAITS_S = (10, 30, 90)   # between attempts; each attempt resumes the .part file
+
+
 def gdrive_fetch(name: str):
+    """Download a checkpoint from the authors' Google Drive, retrying with backoff.
+
+    Drive caps how often a popular file can be downloaded per day; once the cap is hit
+    it serves an error page instead of the file until it resets (up to ~24 h). Retries
+    cover transient failures; for the cap, the error says how to download by hand."""
     import gdown
     dst = PRETRAINED / name
     tmp = dst.with_suffix(dst.suffix + ".part")
-    out = gdown.download(id=GDRIVE[name], output=str(tmp), quiet=False, resume=True)
-    if out is None or not tmp.exists() or tmp.stat().st_size < 1_000_000:
-        raise RuntimeError(
-            f"Google Drive refused the download of {name} (it rate-limits popular files).\n"
-            f"    Wait a while and run `avatarvoice download` again, or download {name} by hand from\n"
-            f"    {DRIVE_FOLDER}\n    into {PRETRAINED}/")
-    tmp.rename(dst)
+    reason = ""
+    for attempt in range(len(GDRIVE_RETRY_WAITS_S) + 1):
+        if attempt:
+            wait = GDRIVE_RETRY_WAITS_S[attempt - 1]
+            print(f"    {YELLOW}Google Drive download failed ({reason}); retrying in {wait}s "
+                  f"(attempt {attempt + 1} of {len(GDRIVE_RETRY_WAITS_S) + 1}){RESET}", flush=True)
+            time.sleep(wait)
+        try:
+            out = gdown.download(id=GDRIVE[name], output=str(tmp), quiet=False, resume=True)
+        except Exception as e:
+            out, reason = None, " ".join(str(e).split())[:120] or type(e).__name__
+        if out is not None and tmp.exists():
+            with open(tmp, "rb") as f:
+                if f.read(2) == b"PK":          # torch checkpoints are zip files
+                    tmp.rename(dst)
+                    return
+            reason = "got a web page instead of the file"
+            tmp.unlink()                        # an error page, not a partial checkpoint
+        elif out is not None:
+            reason = "no file was saved"
+    limited = any(s in reason.lower() for s in ("too many users", "quota", "web page"))
+    raise RuntimeError(
+        (f"Google Drive is refusing {name} right now: it caps how often a popular file can be\n"
+         f"    downloaded, and the cap resets within about 24 hours.\n" if limited else
+         f"Couldn't download {name} from Google Drive ({reason}).\n") +
+        f"    Either run `avatarvoice download` again later (it picks up where it left off), or\n"
+        f"    download it in your browser (signing in to Google often gets past the limit):\n"
+        f"      1. Open  https://drive.google.com/file/d/{GDRIVE[name]}/view\n"
+        f"      2. Save it as  {dst}\n"
+        f"      3. Run  avatarvoice download  to fetch the rest.")
 
 
 def items() -> list[Item]:
@@ -89,9 +122,9 @@ def items() -> list[Item]:
         Item("AvatarForcing motion autoencoder (181 MB, Google Drive)",
              lambda: (PRETRAINED / "motion_autoencoder.pth").exists(),
              lambda: gdrive_fetch("motion_autoencoder.pth")),
-        Item("AvatarForcing flow transformer (614 MB, Google Drive)",
+        Item("AvatarForcing flow transformer (614 MB, Hugging Face mirror)",
              lambda: (PRETRAINED / "flow_transformer.pth").exists(),
-             lambda: gdrive_fetch("flow_transformer.pth")),
+             lambda: _flow_transformer()),
         Item("wav2vec2-base-960h audio encoder (378 MB)",
              lambda: (w2v / "model.safetensors").exists() and (w2v / "preprocessor_config.json").exists(),
              lambda: hf_fetch("facebook/wav2vec2-base-960h", local_dir=str(w2v),
@@ -124,6 +157,11 @@ def items() -> list[Item]:
         Item("face detector (face-alignment, ~100 MB)", _face_alignment_present, _face_alignment),
     ]
     return out
+
+
+def _flow_transformer():
+    from huggingface_hub import hf_hub_download
+    hf_hub_download(FLOW_MIRROR[0], "flow_transformer.pth", revision=FLOW_MIRROR[1], local_dir=str(PRETRAINED))
 
 
 def _parakeet_onnx():
